@@ -1,0 +1,10 @@
+{
+  "name": "Remix: Amharic East African Translator",
+  "description": "Translate Amharic text or voice into English, Afaan Oromo, Tigrinya, Somali, and Chinese with offline phrasebooks and step-by-step pronunciation support.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
