@@ -15,7 +15,13 @@ export const OFFLINE_PHRASEBOOK: PhrasebookItem[] = [
     so: "Salaam / Nabad",
     soPhonetic: "Sah-lahm / Nah-bahd",
     zh: "你好 / 和平",
-    zhPhonetic: "Nǐ hǎo / Hé píng"
+    zhPhonetic: "Nǐ hǎo / Hé píng",
+    fr: "Bonjour / Paix",
+    frPhonetic: "Bohn-joor / Peh",
+    ar: "مرحباً / سلام",
+    arPhonetic: "Marhaban / Salaam",
+    es: "Hola / Paz",
+    esPhonetic: "Oh-lah / Path"
   },
   {
     id: "g2",
@@ -31,7 +37,13 @@ export const OFFLINE_PHRASEBOOK: PhrasebookItem[] = [
     so: "Sidee tahay?",
     soPhonetic: "See-deh tah-hai",
     zh: "你好吗？",
-    zhPhonetic: "Nǐ hǎo ma?"
+    zhPhonetic: "Nǐ hǎo ma?",
+    fr: "Comment ça va?",
+    frPhonetic: "Kohm-mahn sah vah",
+    ar: "كيف حالك؟",
+    arPhonetic: "Kay-fa haa-luk",
+    es: "¿Cómo estás?",
+    esPhonetic: "Koh-moh ess-tahs"
   },
   {
     id: "g3",
@@ -47,7 +59,13 @@ export const OFFLINE_PHRASEBOOK: PhrasebookItem[] = [
     so: "Mahadsanid",
     soPhonetic: "Mah-hahd-sah-need",
     zh: "谢谢",
-    zhPhonetic: "Xièxie"
+    zhPhonetic: "Xièxie",
+    fr: "Merci",
+    frPhonetic: "Mair-see",
+    ar: "شكراً جزيلاً",
+    arPhonetic: "Shukran jazeelan",
+    es: "Gracias",
+    esPhonetic: "Grah-thyahs"
   },
   {
     id: "g4",
@@ -63,7 +81,13 @@ export const OFFLINE_PHRASEBOOK: PhrasebookItem[] = [
     so: "Fadlan I caawi",
     soPhonetic: "Fahd-lahn ee chaa-wee",
     zh: "请帮帮我",
-    zhPhonetic: "Qǐng bāng bāng wǒ"
+    zhPhonetic: "Qǐng bāng bāng wǒ",
+    fr: "S'il vous plaît aidez-moi",
+    frPhonetic: "Seel voo play ay-day mwah",
+    ar: "الرجاء مساعدتي",
+    arPhonetic: "Ar-raja'a musa'adatee",
+    es: "Por favor, ayúdame",
+    esPhonetic: "Por fah-vor ah-yoo-dah-meh"
   },
   {
     id: "g5",
@@ -79,7 +103,13 @@ export const OFFLINE_PHRASEBOOK: PhrasebookItem[] = [
     so: "Halkee buu cusbitaalku joogaa?",
     soPhonetic: "Hal-kay boo oos-bee-taal-koo joh-gah",
     zh: "医院在哪里？",
-    zhPhonetic: "Yīyuàn zài nǎlǐ?"
+    zhPhonetic: "Yīyuàn zài nǎlǐ?",
+    fr: "Où est l'hôpital?",
+    frPhonetic: "Oo ay lo-pee-tahl",
+    ar: "أين المستشفى؟",
+    arPhonetic: "Ayna al-mustashfa",
+    es: "¿Dónde está el hospital?",
+    esPhonetic: "Dohn-deh ess-tah el oss-pee-tahl"
   },
   {
     id: "g6",

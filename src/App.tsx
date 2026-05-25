@@ -19,7 +19,13 @@ import {
   Bookmark,
   Check,
   AlertCircle,
-  Star
+  Star,
+  Play,
+  Pause,
+  Settings,
+  VolumeX,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 import { OFFLINE_PHRASEBOOK, searchPhrasebook } from "./phrasebook";
 import { TranslationResult, HistoryItem, SupportedLanguage, LANGUAGE_LABELS } from "./types";
@@ -77,6 +83,30 @@ const QUICK_TEMPLATES_BY_LANG: Record<SupportedLanguage, { text: string; meaning
     { text: "我要水", meaning: "I want water (Wǒ yào shuǐ)" },
     { text: "你好吗？", meaning: "How are you? (Nǐ hǎo ma?)" },
     { text: "我不明白", meaning: "I don't understand (Wǒ bù míngbái)" }
+  ],
+  fr: [
+    { text: "Bonjour", meaning: "Hello" },
+    { text: "Merci beaucoup", meaning: "Thank you" },
+    { text: "Où est l'hôpital?", meaning: "Where is the hospital?" },
+    { text: "Je veux de l'eau", meaning: "I want water" },
+    { text: "Comment ça va?", meaning: "How are you?" },
+    { text: "Je ne comprends pas", meaning: "I don't understand" }
+  ],
+  ar: [
+    { text: "مرحباً", meaning: "Hello (Marhaban)" },
+    { text: "شكراً جزيلاً", meaning: "Thank you (Shukran)" },
+    { text: "أين المستشفى؟", meaning: "Where is the hospital? (Ayna al-mustashfa?)" },
+    { text: "أريد الماء", meaning: "I want water (Ureedu al-ma'a)" },
+    { text: "كيف حالك؟", meaning: "How are you? (Kayfa haluka?)" },
+    { text: "لا أفهم", meaning: "I don't understand (La afham)" }
+  ],
+  es: [
+    { text: "Hola", meaning: "Hello" },
+    { text: "Muchas gracias", meaning: "Thank you" },
+    { text: "¿Dónde está el hospital?", meaning: "Where is the hospital?" },
+    { text: "Quiero agua", meaning: "I want water" },
+    { text: "¿Cómo estás?", meaning: "How are you?" },
+    { text: "No entiendo", meaning: "I don't understand" }
   ]
 };
 
@@ -87,7 +117,10 @@ const LANGUAGE_SPEECH_CODES: Record<SupportedLanguage, string> = {
   om: "om-ET",
   ti: "ti-ET",
   so: "so-SO",
-  zh: "zh-CN"
+  zh: "zh-CN",
+  fr: "fr-FR",
+  ar: "ar-SA",
+  es: "es-ES"
 };
 
 export default function App() {
@@ -151,6 +184,15 @@ export default function App() {
   const [loadingCardTts, setLoadingCardTts] = useState<string | null>(null);
   const [focusedLang, setFocusedLang] = useState<SupportedLanguage | null>(null);
 
+  // Playlist & Batch Play States
+  const [playlistPlaying, setPlaylistPlaying] = useState(false);
+  const [activePlaylistPhraseIdx, setActivePlaylistPhraseIdx] = useState<number | null>(null);
+  const [playlistActiveLang, setPlaylistActiveLang] = useState<SupportedLanguage | null>(null);
+  const [playlistDelayMs, setPlaylistDelayMs] = useState(1500); // 1.5s delay is excellent for language study absorption
+  const [playlistLangsToPlay, setPlaylistLangsToPlay] = useState<SupportedLanguage[]>(["en", "zh", "fr", "ar", "es", "am", "om", "ti", "so"]);
+  const [playlistSettingsOpenIdx, setPlaylistSettingsOpenIdx] = useState<number | null>(null);
+  const playlistCancelRef = useRef<boolean>(false);
+
   // References for Web Audio Wave Visualizer
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -202,7 +244,10 @@ export default function App() {
           om: { text: "Baga nagaan dhuftan", phonetic: "Bah-gah nah-gahn dhoof-tahn", notes: "Polite welcoming phrase in Afaan Oromo." },
           ti: { text: "እንኳዕ ደሓን መጻእኻ", phonetic: "En-kwa-eh deh-hahn meh-tsah-ekh-kha", notes: "Tigrinya translation written in Ge'ez characters." },
           so: { text: "Soo dhowow", phonetic: "Soh dhoh-woh", notes: "Standard greeting in Somali." },
-          zh: { text: "欢迎", phonetic: "Huānyíng", notes: "Standard welcoming phrase in Mandarin Chinese." }
+          zh: { text: "欢迎", phonetic: "Huānyíng", notes: "Standard welcoming phrase in Mandarin Chinese." },
+          fr: { text: "Bienvenue", phonetic: "Byeh-vuh-noo", notes: "Standard welcoming phrase in French." },
+          ar: { text: "مرحباً بك", phonetic: "Marhaban bika", notes: "Arabic welcoming greeting." },
+          es: { text: "Bienvenido", phonetic: "Byen-beh-nee-doh", notes: "Spanish welcome greeting." }
         }
       }
     ];
@@ -407,7 +452,7 @@ export default function App() {
 
           if (matched) {
             const translationsData: any = {};
-            const availableLangs: SupportedLanguage[] = ["am", "en", "om", "ti", "so", "zh"];
+            const availableLangs = Object.keys(LANGUAGE_LABELS) as SupportedLanguage[];
             
             const nativeTexts: Record<string, string> = {
               am: matched.amharic,
@@ -415,7 +460,10 @@ export default function App() {
               om: matched.om,
               ti: matched.ti,
               so: matched.so,
-              zh: matched.zh
+              zh: matched.zh,
+              fr: matched.fr || "",
+              ar: matched.ar || "",
+              es: matched.es || ""
             };
             const phonetics: Record<string, string> = {
               am: matched.amharicPhonetic,
@@ -423,7 +471,10 @@ export default function App() {
               om: matched.omPhonetic,
               ti: matched.tiPhonetic,
               so: matched.soPhonetic,
-              zh: matched.zhPhonetic
+              zh: matched.zhPhonetic,
+              fr: matched.frPhonetic || "",
+              ar: matched.arPhonetic || "",
+              es: matched.esPhonetic || ""
             };
 
             const targetLangsList = targetLang === "all" 
@@ -449,7 +500,7 @@ export default function App() {
           } else {
             const translationsData: any = {};
             const targetLangsList = targetLang === "all" 
-              ? (["am", "en", "om", "ti", "so", "zh"] as SupportedLanguage[]).filter(l => l !== sourceLang)
+              ? (Object.keys(LANGUAGE_LABELS) as SupportedLanguage[]).filter(l => l !== sourceLang)
               : [targetLang as SupportedLanguage];
 
             targetLangsList.forEach(tCode => {
@@ -485,7 +536,7 @@ export default function App() {
     // B. ONLINE TRANSLATION HANDLER VIA EXPRESS + GEMINI BACKEND API
     try {
       const targetLangsList = targetLang === "all" 
-        ? (["am", "en", "om", "ti", "so", "zh"] as SupportedLanguage[]).filter(l => l !== sourceLang)
+        ? (Object.keys(LANGUAGE_LABELS) as SupportedLanguage[]).filter(l => l !== sourceLang)
         : [targetLang as SupportedLanguage];
 
       const response = await fetch("/api/translate", {
@@ -537,88 +588,166 @@ export default function App() {
   };
 
   // 5. Text-to-Speech vocal output: Web synthesiser for English, Gemini TTS for Regional dialects
-  const handleHearVoice = async (langPlayKey: string, text: string, phonetic: string, playbackRate = 1.0, preferredVoiceURI?: string) => {
+  const handleHearVoice = async (langPlayKey: string, text: string, phonetic: string, playbackRate = 1.0, preferredVoiceURI?: string): Promise<void> => {
     stopAnyActivePlayback();
     setActivePlayingCard(null);
 
     const activeLang = langPlayKey.includes("-") ? langPlayKey.split("-")[1] as SupportedLanguage : langPlayKey as SupportedLanguage;
 
-    // English and Chinese have perfect offline/browser voice synthesiser support
-    if (activeLang === "en" || activeLang === "zh") {
+    return new Promise<void>(async (resolve) => {
+      // English, Chinese, French, Arabic, and Spanish have perfect offline/browser voice synthesiser support
+      if (activeLang === "en" || activeLang === "zh" || activeLang === "fr" || activeLang === "ar" || activeLang === "es") {
+        try {
+          setActivePlayingCard(langPlayKey);
+          let voiceLang = "en-US";
+          if (activeLang === "zh") voiceLang = "zh-CN";
+          else if (activeLang === "fr") voiceLang = "fr-FR";
+          else if (activeLang === "ar") voiceLang = "ar-SA";
+          else if (activeLang === "es") voiceLang = "es-ES";
+
+          playOfflineSpeech(text, voiceLang, () => {
+            setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
+            resolve();
+          }, playbackRate, preferredVoiceURI);
+        } catch (e) {
+          console.warn(`SpeechSynthesis error on ${activeLang}:`, e);
+          setActivePlayingCard(null);
+          resolve();
+        }
+        return;
+      }
+
+      // For Oromo, Tigrinya, and Somali: If offline or API fails, speak the phonetic sound guide via browser synthesis
+      if (isOffline) {
+        try {
+          setActivePlayingCard(langPlayKey);
+          playOfflineSpeech(phonetic, "en-US", () => {
+            setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
+            resolve();
+          }, playbackRate, preferredVoiceURI);
+        } catch (e) {
+          console.warn("SpeechSynthesis error on offline phonetic speaker fallback:", e);
+          setActivePlayingCard(null);
+          resolve();
+        }
+        return;
+      }
+
+      // Online mode: call our backend Express TTS API using gemini-3.1-flash-tts-preview
       try {
-        setActivePlayingCard(langPlayKey);
-        const voiceLang = activeLang === "en" ? "en-US" : "zh-CN";
-        playOfflineSpeech(text, voiceLang, () => {
-          setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
-        }, playbackRate, preferredVoiceURI);
-      } catch (e) {
-        console.warn(`SpeechSynthesis error on ${activeLang}:`, e);
-        setActivePlayingCard(null);
-      }
-      return;
-    }
+        setLoadingCardTts(langPlayKey);
+        const response = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            language: LANGUAGE_LABELS[activeLang]?.label || activeLang,
+            phonetic
+          })
+        });
 
-    // For Oromo, Tigrinya, and Somali: If offline or API fails, speak the phonetic sound guide via browser synthesis
-    if (isOffline) {
-      try {
-        setActivePlayingCard(langPlayKey);
-        playOfflineSpeech(phonetic, "en-US", () => {
-          setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
-        }, playbackRate, preferredVoiceURI);
-      } catch (e) {
-        console.warn("SpeechSynthesis error on offline phonetic speaker fallback:", e);
-        setActivePlayingCard(null);
-      }
-      return;
-    }
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || "Voice synthesizer failed.");
+        }
 
-    // Online mode: call our backend Express TTS API using gemini-3.1-flash-tts-preview
-    try {
-      setLoadingCardTts(langPlayKey);
-      const response = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          language: LANGUAGE_LABELS[activeLang]?.label || activeLang,
-          phonetic
-        })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || "Voice synthesizer failed.");
+        const { audioData } = await response.json();
+        if (audioData) {
+          setActivePlayingCard(langPlayKey);
+          await playRawPcmBase64(audioData, 24000, playbackRate);
+          setActivePlayingCard(null);
+        }
+        resolve();
+      } catch (err: any) {
+        console.error("Online synthesis failed:", err);
+        // Fallback: Speak phonetic version using browser Web Speech
+        try {
+          setActivePlayingCard(langPlayKey);
+          playOfflineSpeech(phonetic, "en-US", () => {
+            setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
+            resolve();
+          }, playbackRate, preferredVoiceURI);
+        } catch (e) {
+          console.warn("SpeechSynthesis error on online-to-offline phonetic speaker fallback:", e);
+          setActivePlayingCard(null);
+          resolve();
+        }
+      } finally {
+        setLoadingCardTts(null);
       }
-
-      const { audioData } = await response.json();
-      if (audioData) {
-        setActivePlayingCard(langPlayKey);
-        await playRawPcmBase64(audioData, 24000, playbackRate);
-        setActivePlayingCard(null);
-      }
-    } catch (err: any) {
-      console.error("Online synthesis failed:", err);
-      // Fallback: Speak phonetic version using browser Web Speech
-      try {
-        setActivePlayingCard(langPlayKey);
-        playOfflineSpeech(phonetic, "en-US", () => {
-          setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
-        }, playbackRate, preferredVoiceURI);
-      } catch (e) {
-        console.warn("SpeechSynthesis error on online-to-offline phonetic speaker fallback:", e);
-        setActivePlayingCard(null);
-      }
-    } finally {
-      setLoadingCardTts(null);
-    }
+    });
   };
 
   const handleStopVoice = () => {
+    playlistCancelRef.current = true;
+    setPlaylistPlaying(false);
+    setActivePlaylistPhraseIdx(null);
+    setPlaylistActiveLang(null);
     stopAnyActivePlayback();
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
     setActivePlayingCard(null);
+  };
+
+  const handlePlayAllSequential = async (phraseIdx: number, result: TranslationResult) => {
+    // If already playing this playlist, clicking again toggles/stops it
+    if (playlistPlaying && activePlaylistPhraseIdx === phraseIdx) {
+      handleStopVoice();
+      return;
+    }
+
+    // Prepare active playlist run states
+    handleStopVoice(); // Stop any other single playing or active speech
+    
+    // Brief setTimeout to allow previous cancel states to clear fully
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    setPlaylistPlaying(true);
+    setActivePlaylistPhraseIdx(phraseIdx);
+    playlistCancelRef.current = false;
+
+    // Filter to languages present in the translation details
+    const languagesToSynthesize = (Object.keys(LANGUAGE_LABELS) as SupportedLanguage[]).filter(langKey => {
+      return result.translations[langKey] && playlistLangsToPlay.includes(langKey);
+    });
+
+    for (let i = 0; i < languagesToSynthesize.length; i++) {
+      if (playlistCancelRef.current) break;
+
+      const langKey = languagesToSynthesize[i];
+      setPlaylistActiveLang(langKey);
+
+      const item = result.translations[langKey];
+      if (item) {
+        const cardKey = `${phraseIdx}-${langKey}`;
+        // Wait organically for this translation text-to-speech to complete speaking!
+        await handleHearVoice(cardKey, item.text, item.phonetic);
+      }
+
+      // Check for user cancellation state again
+      if (playlistCancelRef.current) break;
+
+      // Add educational delay after spelling unless it is the last translation
+      if (i < languagesToSynthesize.length - 1) {
+        await new Promise(resolve => {
+          const timer = setTimeout(resolve, playlistDelayMs);
+          // If stopped while in timeout, resolve immediately to break clean
+          const checkCancel = setInterval(() => {
+            if (playlistCancelRef.current) {
+              clearTimeout(timer);
+              clearInterval(checkCancel);
+              resolve(null);
+            }
+          }, 50);
+        });
+      }
+    }
+
+    // Clean up run states of the playlist manager
+    setPlaylistPlaying(false);
+    setActivePlaylistPhraseIdx(null);
+    setPlaylistActiveLang(null);
   };
 
   // Quick helper to search phrasebook locally
@@ -641,7 +770,10 @@ export default function App() {
         om: { text: phrase.om, phonetic: phrase.omPhonetic, notes: `Matched offline dictionary (${phrase.category})` },
         ti: { text: phrase.ti, phonetic: phrase.tiPhonetic, notes: `Matched offline dictionary (${phrase.category})` },
         so: { text: phrase.so, phonetic: phrase.soPhonetic, notes: `Matched offline dictionary (${phrase.category})` },
-        zh: { text: phrase.zh, phonetic: phrase.zhPhonetic, notes: `Matched offline dictionary (${phrase.category})` }
+        zh: { text: phrase.zh, phonetic: phrase.zhPhonetic, notes: `Matched offline dictionary (${phrase.category})` },
+        fr: { text: phrase.fr || "", phonetic: phrase.frPhonetic || "", notes: `Matched offline dictionary (${phrase.category})` },
+        ar: { text: phrase.ar || "", phonetic: phrase.arPhonetic || "", notes: `Matched offline dictionary (${phrase.category})` },
+        es: { text: phrase.es || "", phonetic: phrase.esPhonetic || "", notes: `Matched offline dictionary (${phrase.category})` }
       },
       grammarBreakdown: [
         { word: phrase.amharic, pos: "Common Expression", meaning: phrase.en }
@@ -1129,6 +1261,128 @@ export default function App() {
                           </div>
                         </div>
 
+                        {/* Playlist Controller Strip */}
+                        <div className="flex items-center justify-between gap-3 p-2 px-3 rounded-2xl bg-slate-50 border border-slate-150 mb-3 text-xs font-sans">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePlayAllSequential(phraseIdx, phraseResult);
+                              }}
+                              className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-xl transition-all active:scale-95 cursor-pointer border ${
+                                playlistPlaying && activePlaylistPhraseIdx === phraseIdx
+                                  ? "bg-rose-100 hover:bg-rose-200 border-rose-200 text-rose-700 animate-pulse"
+                                  : "bg-[#eff6ff] hover:bg-[#dbeafe] border-[#1e40af]/15 text-[#1e40af]"
+                              }`}
+                            >
+                              {playlistPlaying && activePlaylistPhraseIdx === phraseIdx ? (
+                                <>
+                                  <VolumeX className="w-3 h-3" />
+                                  <span>Stop Sequential Play</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Play className="w-3 h-3 fill-current" />
+                                  <span>Play All Sequential</span>
+                                </>
+                              )}
+                            </button>
+
+                            {playlistPlaying && activePlaylistPhraseIdx === phraseIdx && playlistActiveLang && (
+                              <span className="flex items-center gap-1.5 text-[9.5px] text-slate-500 font-bold bg-white border border-slate-250/50 rounded-lg px-2 py-0.5 shadow-3xs">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping inline-block" />
+                                Speaking: <span className="text-emerald-600">{LANGUAGE_LABELS[playlistActiveLang]?.flag} {LANGUAGE_LABELS[playlistActiveLang]?.label}</span>
+                              </span>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPlaylistSettingsOpenIdx(prev => prev === phraseIdx ? null : phraseIdx);
+                            }}
+                            className={`p-1.5 rounded-xl hover:bg-slate-200 text-slate-500 hover:text-slate-800 cursor-pointer border border-transparent hover:border-slate-200 transition-all ${
+                              playlistSettingsOpenIdx === phraseIdx ? "bg-slate-200 text-slate-800" : ""
+                            }`}
+                            title="Playlist Settings"
+                          >
+                            <Settings className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+
+                        {/* Playlist Collapsible Settings Panel */}
+                        {playlistSettingsOpenIdx === phraseIdx && (
+                          <div className="bg-slate-50/50 border border-slate-200/60 rounded-2xl p-4 mb-3 space-y-3 font-sans" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex flex-col gap-1.5">
+                              <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest font-sans">
+                                Study Mode Silence Delay
+                              </span>
+                              <div className="flex flex-wrap gap-1.5 items-center">
+                                {[500, 1000, 1500, 2000, 3000].map((ms) => (
+                                  <button
+                                    key={ms}
+                                    type="button"
+                                    onClick={() => setPlaylistDelayMs(ms)}
+                                    className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                                      playlistDelayMs === ms
+                                        ? "bg-slate-850 text-white"
+                                        : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-100"
+                                    }`}
+                                  >
+                                    {(ms / 1000).toFixed(1)}s Pause
+                                  </button>
+                                ))}
+                                <span className="text-[10px] text-slate-400 font-medium italic ml-auto">(Interval between spoken results)</span>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col gap-2 border-t border-slate-200/50 pt-2.5">
+                              <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest font-sans">
+                                Speech Playlist Queue (Toggle Order &amp; Inclusion)
+                              </span>
+                              <div className="flex flex-wrap gap-1.5">
+                                {(Object.keys(LANGUAGE_LABELS) as SupportedLanguage[]).map((langKey) => {
+                                  const isIncluded = playlistLangsToPlay.includes(langKey);
+                                  const meta = LANGUAGE_LABELS[langKey];
+                                  const hasTranslation = !!phraseResult.translations[langKey];
+                                  if (!hasTranslation) return null;
+
+                                  return (
+                                    <button
+                                      key={langKey}
+                                      type="button"
+                                      onClick={() => {
+                                        setPlaylistLangsToPlay(prev => {
+                                          if (prev.includes(langKey)) {
+                                            return prev.filter(k => k !== langKey);
+                                          } else {
+                                            return [...prev, langKey];
+                                          }
+                                        });
+                                      }}
+                                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all cursor-pointer border ${
+                                        isIncluded
+                                          ? "bg-slate-800 border-slate-800 text-white"
+                                          : "bg-white border-slate-200 text-slate-500 opacity-60 hover:opacity-100"
+                                      }`}
+                                    >
+                                      <span>{meta.flag}</span>
+                                      <span>{meta.label}</span>
+                                      {isIncluded ? (
+                                        <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                      ) : (
+                                        <span className="w-1.5 h-1.5 rounded-full bg-slate-300" />
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {/* High readability mode header inside card (focusedLang) */}
                         {focusedLang && (
                           <div className="flex items-center justify-between mb-3 bg-[#eff6ff]/70 border border-[#1e40af]/10 rounded-xl px-4 py-2 shadow-2xs">
@@ -1146,7 +1400,7 @@ export default function App() {
 
                         {/* Scrollable Horizontal translation list */}
                         <div className="flex gap-4 overflow-x-auto pb-2 snap-x scrollbar-thin scrollbar-thumb-slate-200">
-                          {((["am", "en", "om", "ti", "so", "zh"] as SupportedLanguage[])
+                          {((Object.keys(LANGUAGE_LABELS) as SupportedLanguage[])
                             .filter(k => k !== sourceLang && (targetLang === "all" || targetLang === k)))
                             .map((langKey) => {
                               if (focusedLang && focusedLang !== langKey) return null;

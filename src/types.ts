@@ -4,7 +4,7 @@ export interface TranslationDetail {
   notes?: string;
 }
 
-export type SupportedLanguage = "am" | "en" | "om" | "ti" | "so" | "zh";
+export type SupportedLanguage = "am" | "en" | "om" | "ti" | "so" | "zh" | "fr" | "ar" | "es";
 
 export type LanguageTranslations = Record<SupportedLanguage, TranslationDetail>;
 
@@ -36,6 +36,12 @@ export interface PhrasebookItem {
   soPhonetic: string;
   zh: string;
   zhPhonetic: string;
+  fr?: string;
+  frPhonetic?: string;
+  ar?: string;
+  arPhonetic?: string;
+  es?: string;
+  esPhonetic?: string;
 }
 
 export interface HistoryItem {
@@ -53,5 +59,8 @@ export const LANGUAGE_LABELS: Record<SupportedLanguage, { label: string; details
   om: { label: "Afaan Oromo", details: "Largest language of Ethiopia, Latin script", flag: "🇪🇹" },
   ti: { label: "Tigrinya", details: "Northern Ethiopia & Eritrea, Ge'ez script", flag: "🇪🇷" },
   so: { label: "Somali", details: "Somalia, Djibouti & East Africa, Latin script", flag: "🇸🇴" },
-  zh: { label: "Chinese (Mandarin)", details: "Standard Simplified Chinese, Hanzi & Pinyin", flag: "🇨🇳" }
+  zh: { label: "Chinese (Mandarin)", details: "Standard Simplified Chinese, Hanzi & Pinyin", flag: "🇨🇳" },
+  fr: { label: "French", details: "Official language of France & 29 nations, Latin script", flag: "🇫🇷" },
+  ar: { label: "Arabic", details: "Middle East & North Africa, Arabic script from right-to-left", flag: "🇸🇦" },
+  es: { label: "Spanish", details: "Second-most spoken native language worldwide, Latin script", flag: "🇪🇸" }
 };

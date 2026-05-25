@@ -65,11 +65,12 @@ app.post("/api/translate", async (req, res) => {
 
     // System prompt instructing the model to be a multi-lingual translation expert
     const systemInstruction = 
-      "You are a licensed multi-lingual translation and linguistic expert specializing in Amharic, English, Afaan Oromo, Tigrinya, Somali, and Chinese. " +
+      "You are a licensed multi-lingual translation and linguistic expert specializing in Amharic, English, Afaan Oromo, Tigrinya, Somali, Chinese, French, Arabic, and Spanish. " +
       `Translate each phrase from the source language code: "${sourceLang}" to these target language codes: ${JSON.stringify(targetLangs)}. ` +
       "For Amharic ('am') and Tigrinya ('ti'), use the Ethiopic/Ge'ez script. " +
       "For Chinese ('zh'), use Simplified Hanzi characters accompanied by clear Pinyin tone guides (e.g. Nǐ hǎo). " +
-      "For English ('en'), Afaan Oromo ('om'), and Somali ('so'), use standard correct Latin script. " +
+      "For Arabic ('ar'), use the Arabic Abjad script from right-to-left layout with clear vowel markers, and standard romanized Phonetic transliteration. " +
+      "For English ('en'), Afaan Oromo ('om'), Somali ('so'), French ('fr'), and Spanish ('es'), use standard correct Latin script with proper diacritics and accents. " +
       "Generate standard, clear phonetic pronunciation guides (phonetic transliterations) for ALL translation results, so English or non-native speakers can pronounce them accurately. " +
       "Inside the 'grammarBreakdown' array, provide a morphological breakdown of the words in the original phrase with parts of speech and translation meanings. " +
       "Inside the 'syllables' array, split the original phrase into logical phonetic pronunciation syllables or segments.";
@@ -138,6 +139,33 @@ app.post("/api/translate", async (req, res) => {
                         required: ["text", "phonetic"]
                       },
                       zh: {
+                        type: Type.OBJECT,
+                        properties: {
+                          text: { type: Type.STRING },
+                          phonetic: { type: Type.STRING },
+                          notes: { type: Type.STRING }
+                        },
+                        required: ["text", "phonetic"]
+                      },
+                      fr: {
+                        type: Type.OBJECT,
+                        properties: {
+                          text: { type: Type.STRING },
+                          phonetic: { type: Type.STRING },
+                          notes: { type: Type.STRING }
+                        },
+                        required: ["text", "phonetic"]
+                      },
+                      ar: {
+                        type: Type.OBJECT,
+                        properties: {
+                          text: { type: Type.STRING },
+                          phonetic: { type: Type.STRING },
+                          notes: { type: Type.STRING }
+                        },
+                        required: ["text", "phonetic"]
+                      },
+                      es: {
                         type: Type.OBJECT,
                         properties: {
                           text: { type: Type.STRING },
