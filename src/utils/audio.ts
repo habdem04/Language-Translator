@@ -5,8 +5,15 @@
 
 let activeAudioContext: AudioContext | null = null;
 let activeSourceNode: AudioBufferSourceNode | null = null;
+let activeLoopTimeout: any = null;
+let isPlaybackLoopCancelled = false;
 
 export function stopAnyActivePlayback() {
+  isPlaybackLoopCancelled = true;
+  if (activeLoopTimeout) {
+    clearTimeout(activeLoopTimeout);
+    activeLoopTimeout = null;
+  }
   if (activeSourceNode) {
     try {
       activeSourceNode.stop();
@@ -17,10 +24,11 @@ export function stopAnyActivePlayback() {
   }
 }
 
-export function playRawPcmBase64(base64Str: string, sampleRate = 24000, playbackRate = 1.0): Promise<void> {
+export function playRawPcmBase64(base64Str: string, sampleRate = 24000, playbackRate = 1.0, volume = 1.0, loop = false): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       stopAnyActivePlayback();
+      isPlaybackLoopCancelled = false;
 
       // Initialize or resume context
       if (!activeAudioContext) {
@@ -57,7 +65,14 @@ export function playRawPcmBase64(base64Str: string, sampleRate = 24000, playback
       const sourceNode = activeAudioContext.createBufferSource();
       sourceNode.buffer = audioBuffer;
       sourceNode.playbackRate.value = playbackRate;
-      sourceNode.connect(activeAudioContext.destination);
+      sourceNode.loop = loop;
+
+      // Support volume adjustment via GainNode
+      const gainNode = activeAudioContext.createGain();
+      gainNode.gain.value = volume;
+
+      sourceNode.connect(gainNode);
+      gainNode.connect(activeAudioContext.destination);
       
       activeSourceNode = sourceNode;
       
@@ -112,18 +127,40 @@ export function getAvailableVoicesForLang(voiceLangCode: string): SpeechSynthesi
   });
 }
 
-export function playOfflineSpeech(text: string, voiceLang = "en-US", onEnd?: () => void, playbackRate = 1.0, preferredVoiceURI?: string) {
-  stopAnyActivePlayback();
+export function playOfflineSpeech(
+  text: string, 
+  voiceLang = "en-US", 
+  onEnd?: () => void, 
+  playbackRate = 1.0, 
+  preferredVoiceURI?: string, 
+  volume = 1.0, 
+  loop = false,
+  isIteration = false
+) {
+  if (!isIteration) {
+    stopAnyActivePlayback();
+    isPlaybackLoopCancelled = false;
+  }
+
+  if (isPlaybackLoopCancelled) {
+    if (onEnd) onEnd();
+    return;
+  }
+
   if (!window.speechSynthesis) {
     console.warn("SpeechSynthesis is unsupported in this browser.");
     if (onEnd) onEnd();
     return;
   }
   
-  window.speechSynthesis.cancel(); // Clears queue
+  if (!isIteration) {
+    window.speechSynthesis.cancel(); // Clears queue
+  }
+
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = voiceLang;
   utterance.rate = playbackRate;
+  utterance.volume = volume;
   
   const voices = window.speechSynthesis.getVoices();
   if (preferredVoiceURI) {
@@ -146,7 +183,21 @@ export function playOfflineSpeech(text: string, voiceLang = "en-US", onEnd?: () 
     }
   }
 
-  if (onEnd) {
+  if (loop) {
+    utterance.onend = () => {
+      if (isPlaybackLoopCancelled) {
+        if (onEnd) onEnd();
+        return;
+      }
+      activeLoopTimeout = setTimeout(() => {
+        playOfflineSpeech(text, voiceLang, onEnd, playbackRate, preferredVoiceURI, volume, loop, true);
+      }, 500);
+    };
+    utterance.onerror = (e) => {
+      console.warn("SpeechSynthesis error on loop: ", e);
+      if (onEnd) onEnd();
+    };
+  } else if (onEnd) {
     utterance.onend = () => {
       onEnd();
     };
