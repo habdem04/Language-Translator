@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Volume2, VolumeX, Copy, Check, Info, Maximize2, Minimize2, Eye, EyeOff, HelpCircle, Lightbulb, AlertTriangle, GraduationCap, ChevronDown, ChevronUp, Compass, ArrowLeftRight, ThumbsUp, ThumbsDown } from "lucide-react";
+import { Volume2, VolumeX, Copy, Check, Info, Maximize2, Minimize2, Eye, EyeOff, HelpCircle, Lightbulb, AlertTriangle, GraduationCap, ChevronDown, ChevronUp, Compass, ArrowLeftRight, ThumbsUp, ThumbsDown, Trophy, Award, Star, Sparkles } from "lucide-react";
 import { TranslationDetail, SupportedLanguage, LANGUAGE_LABELS } from "../types";
 import { getAvailableVoicesForLang } from "../utils/audio";
+import { OFFLINE_PHRASEBOOK } from "../phrasebook";
+import { motion, AnimatePresence } from "motion/react";
 
 const LANGUAGE_LEARNING_TIPS: Record<
   SupportedLanguage,
@@ -239,6 +241,208 @@ export default function LanguageCard({
       localStorage.setItem("habeshalingua_audio_looping", newVal ? "true" : "false");
     } catch (e) {
       console.error("Failed to persist looping setting:", e);
+    }
+  };
+
+  // 3-Question Insights Quiz States
+  const [quizState, setQuizState] = useState<"not_started" | "active" | "completed">("not_started");
+  const [quizQuestions, setQuizQuestions] = useState<any[]>([]);
+  const [currentQuestionIdx, setCurrentQuestionIdx] = useState<number>(0);
+  const [selectedAnswerIdx, setSelectedAnswerIdx] = useState<number | null>(null);
+  const [correctAnswersCount, setCorrectAnswersCount] = useState<number>(0);
+  
+  // Storage points state
+  const [globalMasteryPoints, setGlobalMasteryPoints] = useState<number>(() => {
+    try {
+      const persisted = localStorage.getItem("habeshalingua_global_mastery");
+      return persisted !== null ? parseInt(persisted, 10) : 0;
+    } catch {
+      return 0;
+    }
+  });
+
+  const [phraseMasteryXP, setPhraseMasteryXP] = useState<number>(() => {
+    try {
+      const persisted = localStorage.getItem(`habeshalingua_phrase_mastery_xp:${langKey}:${translation.text}`);
+      return persisted !== null ? parseInt(persisted, 10) : 0;
+    } catch {
+      return 0;
+    }
+  });
+
+  // Re-read phrase XP when translation changes
+  useEffect(() => {
+    try {
+      const persisted = localStorage.getItem(`habeshalingua_phrase_mastery_xp:${langKey}:${translation.text}`);
+      setPhraseMasteryXP(persisted !== null ? parseInt(persisted, 10) : 0);
+      setQuizState("not_started"); // Reset quiz when translation changes!
+    } catch {
+      setPhraseMasteryXP(0);
+    }
+  }, [translation.text, langKey]);
+
+  const getIsFavorite = () => {
+    try {
+      const cached = localStorage.getItem("east_african_translate_favorites");
+      if (cached && originalText) {
+        const favs = JSON.parse(cached);
+        return favs.some((f: any) => f.originalText === originalText);
+      }
+    } catch (e) {
+      console.error("Error reading favorites:", e);
+    }
+    return false;
+  };
+
+  // Handle launching quiz
+  const handleStartQuiz = () => {
+    const list = [];
+    
+    // Q1: Guess English meaning from translation text
+    try {
+      const correctMeaning = originalText || "Hello / Welcome";
+      const otherItems = OFFLINE_PHRASEBOOK.filter(item => item.en !== correctMeaning);
+      const uniqueOthers = Array.from(new Set(otherItems.map(item => item.en)))
+        .filter(Boolean)
+        .sort(() => 0.5 - Math.random())
+        .slice(0, 3);
+      
+      while (uniqueOthers.length < 3) {
+        uniqueOthers.push(`Greeting Variant ${uniqueOthers.length + 1}`);
+      }
+
+      const optionsQ1 = [correctMeaning, ...uniqueOthers].sort(() => 0.5 - Math.random());
+      const correctIdxQ1 = optionsQ1.indexOf(correctMeaning);
+
+      list.push({
+        questionText: `What is the accurate English translation for the ${metadata?.label || langKey} phrase "${translation.text}"?`,
+        options: optionsQ1,
+        correctIndex: correctIdxQ1,
+        explanation: `Excellent! "${translation.text}" means "${correctMeaning}" in English.`
+      });
+    } catch (err) {
+      list.push({
+        questionText: `What does the phrase "${translation.text}" translate to in English?`,
+        options: [originalText || "Hello", "Goodbye", "Thank you", "Excuse me"],
+        correctIndex: 0,
+        explanation: `Correct! "${translation.text}" translates to "${originalText || "Hello"}"`
+      });
+    }
+
+    // Q2: Phonetic Pronunciation Choice
+    try {
+      const correctPhonetic = translation.phonetic || "Phonetics not specified";
+      const otherPhoneticsField = langKey === "am" ? "amharicPhonetic" : 
+                                   langKey === "om" ? "omPhonetic" : 
+                                   langKey === "ti" ? "tiPhonetic" : 
+                                   langKey === "so" ? "soPhonetic" : 
+                                   langKey === "zh" ? "zhPhonetic" : 
+                                   langKey === "fr" ? "frPhonetic" : 
+                                   langKey === "ar" ? "arPhonetic" : 
+                                   langKey === "es" ? "esPhonetic" : "enPhonetic";
+
+      const otherPhonet = OFFLINE_PHRASEBOOK
+        .map(p => (p as any)[otherPhoneticsField])
+        .filter(p => !!p && p !== correctPhonetic);
+      
+      const uniquePhonetics = Array.from(new Set(otherPhonet))
+        .filter(Boolean)
+        .sort(() => 0.5 - Math.random())
+        .slice(0, 3);
+
+      while (uniquePhonetics.length < 3) {
+        uniquePhonetics.push(`Phonetics Option ${uniquePhonetics.length + 1}`);
+      }
+
+      const optionsQ2 = [correctPhonetic, ...uniquePhonetics].sort(() => 0.5 - Math.random());
+      const correctIdxQ2 = optionsQ2.indexOf(correctPhonetic);
+
+      list.push({
+        questionText: `Select the correct phonetic pronunciation representation for "${translation.text}".`,
+        options: optionsQ2,
+        correctIndex: correctIdxQ2,
+        explanation: `Perfect! "${translation.text}" is pronounced as "${correctPhonetic}".`
+      });
+    } catch (err) {
+      list.push({
+        questionText: `How is the translation pronounced phonetically?`,
+        options: [translation.phonetic || "Phonetics", "Alternative-Pronunciation-1", "Alternative-Pronunciation-2", "Alternative-Pronunciation-3"],
+        correctIndex: 0,
+        explanation: `Correct! The phonetic transcription is "${translation.phonetic}".`
+      });
+    }
+
+    // Q3: Cultural Insights or Study Pitfalls based on Language Learning Tips
+    try {
+      const tips = LANGUAGE_LEARNING_TIPS[langKey];
+      const correctPitfall = tips?.commonPitfall || "N/A";
+      const otherPitfalls = Object.entries(LANGUAGE_LEARNING_TIPS)
+        .filter(([lk]) => lk !== langKey)
+        .map(([_, v]) => v.commonPitfall);
+
+      const uniquePitfalls = Array.from(new Set(otherPitfalls))
+        .filter(Boolean)
+        .sort(() => 0.5 - Math.random())
+        .slice(0, 3);
+
+      while (uniquePitfalls.length < 3) {
+        uniquePitfalls.push(`Cultural Pitfall ${uniquePitfalls.length + 1}`);
+      }
+
+      const optionsQ3 = [correctPitfall, ...uniquePitfalls].sort(() => 0.5 - Math.random());
+      const correctIdxQ3 = optionsQ3.indexOf(correctPitfall);
+
+      list.push({
+        questionText: `Which of the following is an essential common pitfall to watch out for when studying ${metadata?.label || langKey}?`,
+        options: optionsQ3,
+        correctIndex: correctIdxQ3,
+        explanation: `Brilliant! For ${metadata?.label || langKey}, the key learner pitfall to watch out for is: "${correctPitfall}"`
+      });
+    } catch (err) {
+      list.push({
+        questionText: `Which difficulty level is this ${metadata?.label || langKey} translation classified under?`,
+        options: ["Beginner", "Intermediate", "Advanced", "Introductory"],
+        correctIndex: LANGUAGE_LEARNING_TIPS[langKey]?.difficultyLevel === "Advanced" ? 2 : LANGUAGE_LEARNING_TIPS[langKey]?.difficultyLevel === "Intermediate" ? 1 : 0,
+        explanation: `Yes! It is categorized under the ${LANGUAGE_LEARNING_TIPS[langKey]?.difficultyLevel || "Beginner"} level.`
+      });
+    }
+
+    setQuizQuestions(list);
+    setCurrentQuestionIdx(0);
+    setSelectedAnswerIdx(null);
+    setCorrectAnswersCount(0);
+    setQuizState("active");
+  };
+
+  const handleSelectAnswer = (index: number) => {
+    if (selectedAnswerIdx !== null) return;
+    setSelectedAnswerIdx(index);
+    if (index === quizQuestions[currentQuestionIdx].correctIndex) {
+      setCorrectAnswersCount(prev => prev + 1);
+    }
+  };
+
+  const handleNextQuestion = () => {
+    if (currentQuestionIdx < 2) {
+      setCurrentQuestionIdx(prev => prev + 1);
+      setSelectedAnswerIdx(null);
+    } else {
+      const finalScore = correctAnswersCount + (selectedAnswerIdx === quizQuestions[currentQuestionIdx].correctIndex ? 1 : 0);
+      const isFav = getIsFavorite();
+      const pointsEarned = finalScore * 5;
+      const finalPoints = isFav ? pointsEarned * 2 : pointsEarned;
+      
+      const newGlobalScore = globalMasteryPoints + finalPoints;
+      setGlobalMasteryPoints(newGlobalScore);
+      localStorage.setItem("habeshalingua_global_mastery", String(newGlobalScore));
+
+      const newPhraseScore = Math.min(15, phraseMasteryXP + finalPoints);
+      setPhraseMasteryXP(newPhraseScore);
+      localStorage.setItem(`habeshalingua_phrase_mastery_xp:${langKey}:${translation.text}`, String(newPhraseScore));
+      window.dispatchEvent(new Event("storage_feedback_updated"));
+
+      setCorrectAnswersCount(finalScore);
+      setQuizState("completed");
     }
   };
 
@@ -673,6 +877,238 @@ export default function LanguageCard({
                         <span>Accelerated Study Tip</span>
                       </div>
                       <p className="leading-relaxed pl-5 text-slate-600 italic text-[11.5px]">"{tips.proTip}"</p>
+                    </div>
+
+                    {/* Visual Divider to separate normal tips with Quiz */}
+                    <div className="border-t border-slate-200/60 my-4.5 pt-4.5 space-y-3.5 font-sans text-xs" id="study-insights-quiz-root">
+                      <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                        <div className="flex items-center gap-1.5 text-[#1e40af] font-black text-[10.5px] uppercase tracking-wider">
+                          <Trophy className="w-3.5 h-3.5 text-amber-500 fill-amber-100" />
+                          <span>Interactive Phrase Study Quiz</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 bg-blue-50 border border-blue-200/50 px-2 py-0.5 rounded-lg text-[9px] font-mono text-slate-650 tracking-tight">
+                          <span>Total XP:</span>
+                          <span className="font-extrabold text-[#1e40af]">{globalMasteryPoints} PTS</span>
+                        </div>
+                      </div>
+
+                      {/* Favorite double points notifier */}
+                      {getIsFavorite() ? (
+                        <div className="flex items-center gap-1.5 bg-amber-500/10 border border-amber-500/25 p-2 rounded-xl text-[10px] text-amber-800">
+                          <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />
+                          <p className="font-bold">⭐ Favorite Active: 2x DOUBLE Mastery XP enabled for this phrase! ⭐</p>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 bg-slate-100/80 border border-slate-200 p-2 rounded-xl text-[10px] text-slate-500">
+                          <Info className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <p className="leading-tight">Hint: Star this translation to add it to your <strong className="font-semibold">Favorites</strong> and earn <strong className="font-semibold text-[#1e40af]">2x Double XP</strong> during drills!</p>
+                        </div>
+                      )}
+
+                      {/* Phrase Current Progress Badge */}
+                      <div className="flex items-center gap-1.5 justify-between bg-slate-50 border border-slate-150 p-2 rounded-xl text-[10px] text-slate-500">
+                        <span className="font-medium">Phrase Level:</span>
+                        <div className="flex items-center gap-1">
+                          <span className={`font-black uppercase tracking-wider px-2 py-0.5 rounded-md text-[8.5px] ${
+                            phraseMasteryXP >= 15 
+                              ? "bg-amber-100 text-amber-800 border border-amber-250 font-sans"
+                              : phraseMasteryXP >= 10
+                              ? "bg-[#eff6ff] text-[#1e40af] border border-blue-150 font-sans"
+                              : phraseMasteryXP >= 5
+                              ? "bg-emerald-50 text-emerald-700 border border-emerald-250 font-sans"
+                              : "bg-slate-100 text-slate-500 border border-slate-200 font-sans"
+                          }`}>
+                            {phraseMasteryXP >= 15 ? "Mastered 🏆" : phraseMasteryXP >= 10 ? "Proficient" : phraseMasteryXP >= 5 ? "Initiated" : "Unpracticed"}
+                          </span>
+                          <span className="font-bold text-slate-450 text-[9px] font-mono">({phraseMasteryXP}/15 XP)</span>
+                        </div>
+                      </div>
+
+                      <div className="mt-3">
+                        <AnimatePresence mode="wait">
+                          {quizState === "not_started" && (
+                            <motion.div
+                              key="starting"
+                              initial={{ opacity: 0, y: 5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, y: -5 }}
+                              className="bg-slate-100/50 rounded-xl p-3 text-center space-y-2 border border-slate-200/50"
+                            >
+                              <p className="text-[11px] text-slate-505 leading-relaxed">
+                                Practice phonetic pronunciation, English translations, and study insights to build deep memory connections!
+                              </p>
+                              <button
+                                type="button"
+                                onClick={handleStartQuiz}
+                                className="w-full py-2 px-4 rounded-xl font-heading font-black text-xs text-center border bg-[#1e40af] text-white hover:bg-[#1d4ed8] active:scale-98 cursor-pointer transition-all flex items-center justify-center gap-1.5 shadow-sm"
+                              >
+                                <Sparkles className="w-3.5 h-3.5 text-yellow-350 fill-yellow-325 shrink-0" />
+                                <span>Launch Phrase Quiz (+15 Mastery XP)</span>
+                              </button>
+                            </motion.div>
+                          )}
+
+                          {quizState === "active" && quizQuestions.length > 0 && (
+                            <motion.div
+                              key={`q-${currentQuestionIdx}`}
+                              initial={{ opacity: 0, x: 20 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              exit={{ opacity: 0, x: -20 }}
+                              transition={{ duration: 0.2 }}
+                              className="bg-white rounded-xl p-3 border border-slate-250/70 shadow-2xs space-y-3"
+                            >
+                              {/* Header Progress indicator */}
+                              <div className="flex items-center justify-between gap-1.5 border-b border-slate-100 pb-2">
+                                <span className="text-[9.5px] font-extrabold uppercase tracking-wide text-slate-400">
+                                  Quiz: Question {currentQuestionIdx + 1} of 3
+                                </span>
+                                <div className="w-16 h-1 w-full max-w-[50px] bg-slate-100 rounded-full overflow-hidden">
+                                  <div 
+                                    className="h-full bg-[#1e40af] transition-all duration-300" 
+                                    style={{ width: `${((currentQuestionIdx + 1) / 3) * 100}%` }}
+                                  />
+                                </div>
+                              </div>
+
+                              {/* Question title text */}
+                              <p className="text-[11.5px] font-bold text-slate-855 leading-normal">
+                                {quizQuestions[currentQuestionIdx].questionText}
+                              </p>
+
+                              {/* Action options buttons list */}
+                              <div className="space-y-2 pt-1">
+                                {quizQuestions[currentQuestionIdx].options.map((option: string, opIdx: number) => {
+                                  const isCorrect = opIdx === quizQuestions[currentQuestionIdx].correctIndex;
+                                  const isSelected = opIdx === selectedAnswerIdx;
+                                  const isAnswered = selectedAnswerIdx !== null;
+                                  
+                                  let buttonStyle = "bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700";
+                                  if (isAnswered) {
+                                    if (isCorrect) {
+                                      buttonStyle = "bg-emerald-50 border-emerald-350 text-emerald-800";
+                                    } else if (isSelected) {
+                                      buttonStyle = "bg-rose-50 border-rose-350 text-rose-800";
+                                    } else {
+                                      buttonStyle = "bg-slate-50/50 border-slate-150 text-slate-400 pointer-events-none";
+                                    }
+                                  }
+
+                                  return (
+                                    <button
+                                      key={opIdx}
+                                      type="button"
+                                      onClick={() => handleSelectAnswer(opIdx)}
+                                      disabled={isAnswered}
+                                      className={`w-full text-left px-3 py-2 rounded-xl border text-[11px] font-medium leading-normal flex items-start gap-2 transition-all cursor-pointer ${buttonStyle}`}
+                                    >
+                                      <span className="w-4 h-4 rounded-full bg-black/5 font-mono text-[9px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                                        {String.fromCharCode(65 + opIdx)}
+                                      </span>
+                                      <span className="flex-1">{option}</span>
+                                      
+                                      {isAnswered && isCorrect && (
+                                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 self-center" />
+                                      )}
+                                      {isAnswered && isSelected && !isCorrect && (
+                                        <VolumeX className="w-3.5 h-3.5 text-rose-600 shrink-0 self-center" />
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+
+                              {/* Explanation statement block */}
+                              {selectedAnswerIdx !== null && (
+                                <motion.div
+                                  initial={{ opacity: 0, height: 0 }}
+                                  animate={{ opacity: 1, height: "auto" }}
+                                  className={`p-2.5 rounded-xl text-[10.5px] leading-relaxed border ${
+                                    selectedAnswerIdx === quizQuestions[currentQuestionIdx].correctIndex
+                                      ? "bg-emerald-500/5 border-emerald-500/10 text-emerald-800"
+                                      : "bg-amber-500/5 border-amber-500/10 text-amber-800"
+                                  }`}
+                                >
+                                  {quizQuestions[currentQuestionIdx].explanation}
+                                </motion.div>
+                              )}
+
+                              {/* Controls */}
+                              {selectedAnswerIdx !== null && (
+                                <button
+                                  type="button"
+                                  onClick={handleNextQuestion}
+                                  className="w-full mt-2 py-2 px-4 rounded-xl font-black text-xs text-center border border-[#1e40af] bg-blue-50 hover:bg-[#1e40af] text-[#1e40af] hover:text-white transition-all cursor-pointer active:scale-98 flex items-center justify-center gap-1"
+                                >
+                                  <span>{currentQuestionIdx === 2 ? "Finish Quiz & See Score" : "Next Question"}</span>
+                                  <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
+                                </button>
+                              )}
+                            </motion.div>
+                          )}
+
+                          {quizState === "completed" && (
+                            <motion.div
+                              key="completed"
+                              initial={{ opacity: 0, scale: 0.95 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              exit={{ opacity: 0 }}
+                              className="bg-[#faf9f6] border border-amber-300 rounded-xl p-3.5 text-center space-y-3 shadow-sm"
+                            >
+                              <div className="w-12 h-12 rounded-full bg-amber-100 flex items-center justify-center mx-auto text-amber-500 animate-bounce">
+                                <Award className="w-6 h-6 fill-amber-200" />
+                              </div>
+
+                              <div className="space-y-1">
+                                <h4 className="text-normal font-black text-slate-800 font-heading">
+                                  {correctAnswersCount === 3 ? "👑 Outstanding Mastery! 🏆" : correctAnswersCount >= 1 ? "👍 Solid Attempt!" : "📚 Keep Studying!"}
+                                </h4>
+                                <p className="text-[11px] text-slate-500">
+                                  You correctly identified <strong className="font-extrabold text-[#1e40af]">{correctAnswersCount} out of 3</strong> answers based on Study Insights.
+                                </p>
+                              </div>
+
+                              {/* Points allocation logs */}
+                              <div className="bg-slate-50/50 border border-slate-200/50 rounded-xl p-2 px-3 text-left space-y-1 text-[10px] font-mono">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-slate-500">Correct Answers:</span>
+                                  <span className="font-bold text-slate-800">{correctAnswersCount} / 3</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-slate-505">Base XP:</span>
+                                  <span className="font-bold text-slate-800">+{correctAnswersCount * 5} XP</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[#10b981] font-bold">Favorite Bonus (2x):</span>
+                                  <span className={`font-bold ${getIsFavorite() ? "text-[#10b981]" : "text-slate-400"}`}>
+                                    {getIsFavorite() ? "Active (x2)" : "None"}
+                                  </span>
+                                </div>
+                                <div className="border-t border-slate-200/50 my-1 pt-1 flex items-center justify-between font-sans text-[11px]">
+                                  <span className="font-extrabold text-[#1e40af]">Mastery XP Earned:</span>
+                                  <span className="font-black text-amber-600">+{getIsFavorite() ? (correctAnswersCount * 5 * 2) : (correctAnswersCount * 5)} XP</span>
+                                </div>
+                              </div>
+
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={handleStartQuiz}
+                                  className="flex-1 py-1.5 px-3 rounded-lg border text-[10px] font-extrabold bg-white hover:bg-slate-50 text-slate-700 transition-colors cursor-pointer"
+                                >
+                                  Re-take Quiz
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setQuizState("not_started")}
+                                  className="flex-1 py-1.5 px-3 rounded-lg border text-[10px] font-extrabold bg-slate-800 hover:bg-slate-900 text-white transition-colors cursor-pointer"
+                                >
+                                  Close Quiz
+                                </button>
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
                     </div>
                   </div>
                 )}

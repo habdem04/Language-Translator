@@ -36,7 +36,12 @@ import {
   Camera,
   Upload,
   X,
-  Video
+  Video,
+  MessageSquare,
+  Bot,
+  User,
+  Trophy,
+  Award
 } from "lucide-react";
 import { OFFLINE_PHRASEBOOK, searchPhrasebook } from "./phrasebook";
 import { TranslationResult, HistoryItem, SupportedLanguage, LANGUAGE_LABELS, autoClassifyPhrase } from "./types";
@@ -45,6 +50,8 @@ import SyllableVisualizer from "./components/SyllableVisualizer";
 import FidelSoundboard from "./components/FidelSoundboard";
 import { playRawPcmBase64, playOfflineSpeech, stopAnyActivePlayback } from "./utils/audio";
 import { getAudio, saveAudio, clearLanguage, getDownloadedCount, getLanguageCacheSizeInKb } from "./utils/voiceDb";
+import { startSoundscape, stopSoundscape, setSoundscapeVolume } from "./utils/soundscapes";
+import { DRILL_BANK, DrillPhrase } from "./utils/drillBank";
 
 // Quick tap terms for typing assistance by source language
 const QUICK_TEMPLATES_BY_LANG: Record<SupportedLanguage, { text: string; meaning: string }[]> = {
@@ -418,11 +425,145 @@ export default function App() {
     return [];
   });
   const [favoritesSearchQuery, setFavoritesSearchQuery] = useState("");
-  const [activeRightTab, setActiveRightTab] = useState<"history" | "favorites">("history");
+  const [activeRightTab, setActiveRightTab] = useState<"history" | "favorites" | "chat" | "drills">("history");
+  
+  // Voice Translation Refs and States
+  const isVoiceInputRef = useRef(false);
+  const voiceTranscriptRef = useRef("");
+  const [historySubTab, setHistorySubTab] = useState<"all" | "voice">("all");
+
+  // Clickable Dictionary Word Types & States
+  const [selectedWordDefinition, setSelectedWordDefinition] = useState<{
+    word: string;
+    pos: string;
+    meaning: string;
+    definition?: string;
+    example?: string;
+    synonyms?: string[];
+    pronunciation?: string;
+  } | null>(null);
+  const [loadingWordDefinition, setLoadingWordDefinition] = useState(false);
+  const [wordDefError, setWordDefError] = useState<string | null>(null);
+
+  // Simple Local Storage Quiz Mastery Leaderboard
+  const [topPhrases, setTopPhrases] = useState<{ phrase: string; lang: string; xp: number }[]>([]);
+
+  const loadLeaderboard = () => {
+    const list: { phrase: string; lang: string; xp: number }[] = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith("habeshalingua_phrase_mastery_xp:")) {
+          const parts = key.split(":");
+          const lang = parts[1] || "";
+          const phrase = parts.slice(2).join(":") || "";
+          const xp = parseInt(localStorage.getItem(key) || "0", 10);
+          if (xp > 0 && phrase) {
+            list.push({ phrase, lang, xp });
+          }
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setTopPhrases(list.sort((a, b) => b.xp - a.xp).slice(0, 5));
+  };
+
+  useEffect(() => {
+    loadLeaderboard();
+    window.addEventListener("storage_feedback_updated", loadLeaderboard);
+    return () => {
+      window.removeEventListener("storage_feedback_updated", loadLeaderboard);
+    };
+  }, []);
+
+  const handleWordClick = async (word: string, pos: string, meaning: string) => {
+    setSelectedWordDefinition({ word, pos, meaning });
+    setLoadingWordDefinition(true);
+    setWordDefError(null);
+
+    try {
+      const response = await fetch("/api/word-definition", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          word,
+          pos,
+          meaning,
+          language: LANGUAGE_LABELS[sourceLang]?.label || "Amharic"
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch dictionary definition from server.");
+      }
+
+      const data = await response.json();
+      setSelectedWordDefinition(data);
+    } catch (err: any) {
+      console.error("Dictionary lookup failed:", err);
+      setWordDefError("Could not retrieve detailed definition. Please check connectivity or try again.");
+    } finally {
+      setLoadingWordDefinition(false);
+    }
+  };
+  
+  // Custom Ambient Soundscape States
+  const [activeSoundscape, setActiveSoundscape] = useState<"none" | "addis_cafe" | "library" | "nature_rain">("none");
+  const [soundscapeVolume, setSoundscapeVolume] = useState<number>(0.15);
+
+  // 'Repeat After Me' Drill States
+  const [currentDrillPhrase, setCurrentDrillPhrase] = useState<DrillPhrase | null>(null);
+  const [isDrillRecording, setIsDrillRecording] = useState(false);
+  const [isDrillAnalyzing, setIsDrillAnalyzing] = useState(false);
+  const [drillFeedback, setDrillFeedback] = useState<{ score: number; confidence: string; feedback: string; phoneticGuidance?: string; ipaMatch?: string } | null>(null);
+  const [drillHistory, setDrillHistory] = useState<{ text: string; score: number; timestamp: string }[]>([]);
+  const drillMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const drillAudioChunksRef = useRef<BlobPart[]>([]);
+  
+  // Interactive Chat States
+  const [chatMessages, setChatMessages] = useState<{ role: "user" | "model", text: string, audio?: string }[]>([
+    { role: "model", text: "Hello! I'm your interactive AI language companion. How can I help you practice today?" }
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [isChatRecording, setIsChatRecording] = useState(false);
+  const chatMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chatAudioChunksRef = useRef<BlobPart[]>([]);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  // Continuous Voice Bridge States
+  const [isContinuousVoiceBridge, setIsContinuousVoiceBridge] = useState<boolean>(true);
+  const [chatVolume, setChatVolume] = useState<number>(0);
+  const [isAiSpeaking, setIsAiSpeaking] = useState<boolean>(false);
+
+  // Use refs to avoid stale closures in recursive Web Audio analyzer and onended event callbacks
+  const isContinuousVoiceBridgeRef = useRef<boolean>(true);
+  useEffect(() => {
+    isContinuousVoiceBridgeRef.current = isContinuousVoiceBridge;
+  }, [isContinuousVoiceBridge]);
+
+  const chatAudioContextRef = useRef<AudioContext | null>(null);
+  const chatAnalyserRef = useRef<AnalyserNode | null>(null);
+  const chatActiveStreamRef = useRef<MediaStream | null>(null);
+  const chatAnimationFrameRef = useRef<number | null>(null);
+  const chatTtsAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     localStorage.setItem("east_african_translate_favorites", JSON.stringify(favorites));
   }, [favorites]);
+
+  // Ambient Soundscape state listeners
+  useEffect(() => {
+    startSoundscape(activeSoundscape, soundscapeVolume);
+    return () => {
+      stopSoundscape();
+    };
+  }, [activeSoundscape]);
+
+  useEffect(() => {
+    setSoundscapeVolume(soundscapeVolume);
+  }, [soundscapeVolume]);
 
   const toggleFavorite = (result: TranslationResult) => {
     setFavorites(prev => {
@@ -457,6 +598,431 @@ export default function App() {
   const [playlistLangsToPlay, setPlaylistLangsToPlay] = useState<SupportedLanguage[]>(["en", "zh", "fr", "ar", "es", "am", "om", "ti", "so"]);
   const [playlistSettingsOpenIdx, setPlaylistSettingsOpenIdx] = useState<number | null>(null);
   const playlistCancelRef = useRef<boolean>(false);
+
+  // Interactive Chat Handlers
+  const handleSendChatMessage = async (payload: { text?: string, audioBase64?: string, audioMimeType?: string }) => {
+    if ((!payload.text && !payload.audioBase64) || isChatLoading) return;
+
+    setChatInput("");
+    
+    // Add user message to UI
+    let userMessageText = payload.text || "🎙️ Audio Message";
+    setChatMessages(prev => [...prev, { role: "user", text: userMessageText, audio: payload.audioBase64 }]);
+    setIsChatLoading(true);
+
+    try {
+      const hasResult = !!translationResult;
+      const originalTextPhrase = hasResult ? `"${translationResult.originalText}"` : "their own spoken phrases, greetings, or questions";
+      const studyLangs = hasResult 
+        ? Object.keys(translationResult.translations).map(k => LANGUAGE_LABELS[k as SupportedLanguage]?.label || k).join(", ") 
+        : "East African languages (such as Amharic, Afaan Oromo, Tigrinya, Somali) and English";
+      
+      const systemInstruction = `You are a warm, encouraging, and bilingual AI language tutor specializing in East African languages. The user is currently studying or practicing ${originalTextPhrase}. They want to practice translation, vocabulary, pronunciation, and general conversation in: ${studyLangs}.
+When the user speaks to you (for example in Amharic, Afaan Oromo, Tigrinya, Somali, or English), you must greet them warmly in their language of choice, reply naturally, and discuss the topic or phrase with them. Do NOT assume they are learning a word called "unknown" or "none" or that they want to study "unknown". If they say a greeting like "ደህና አደርክ!", they are greeting you "Good morning" in Amharic; you should happily respond back to them in Amharic first and talk about greetings or languages. Use English for explanations but enthusiastically model and practice the target languages with them as a peer or teacher.
+Be concise, friendly, and helpful. If the user sent audio in Amharic/Oromo/Tigrinya/Somali/English, listen and respond naturally in the same language.
+IMPORTANT constraints:
+1. NEVER use markdown formatting like **bold**, *italic*, list bullet points, or headers. Write in clean, raw, plain conversational text only, because your output is converted to TTS and spoken out loud, and markdown formatting characters make speech engines sound stuttery, robotic, or read punctuation.
+2. Respond with natural, friendly conversational sentences that are flowy to listen to.`;
+
+      const currentMessages = [...chatMessages, { role: "user", text: payload.text, audioBase64: payload.audioBase64, audioMimeType: payload.audioMimeType }];
+
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+           messages: currentMessages,
+           systemInstruction,
+           model: "gemini-3.5-flash"
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Network error");
+      
+      const replyText = data.text;
+      setChatMessages(prev => [...prev, { role: "model", text: replyText }]);
+
+      // Automatically speak the reply
+      try {
+        const sourceLangName = translationResult?.detectedSourceLanguage ? LANGUAGE_LABELS[translationResult.detectedSourceLanguage]?.label || translationResult.detectedSourceLanguage : "East African language";
+        const targetLangs = translationResult?.translations 
+          ? Object.keys(translationResult.translations).map(k => LANGUAGE_LABELS[k as SupportedLanguage]?.label || k).join(", ") 
+          : "English";
+
+        const speakingLangContext = `a mix of ${sourceLangName} and ${targetLangs} as you naturally used in the text`;
+
+        setIsAiSpeaking(true);
+        let playedSuccessfully = false;
+
+        try {
+          const ttsRes = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+               text: replyText,
+               language: speakingLangContext, 
+            })
+          });
+          const ttsData = await ttsRes.json();
+          if (ttsRes.ok && ttsData.audioData) {
+            // Excellent! Decode and play the raw little-endian linear PCM stream using Web Audio API
+            await playRawPcmBase64(ttsData.audioData, 24000);
+            playedSuccessfully = true;
+
+            setIsAiSpeaking(false);
+            // Continuous recording loop triggering
+            if (isContinuousVoiceBridgeRef.current && activeRightTab === "chat") {
+              startChatRecording();
+            }
+          }
+        } catch (apiError) {
+          console.warn("Gemini Cloud TTS call error or busy. Falling back to local browser synthesis:", apiError);
+        }
+
+        if (!playedSuccessfully) {
+          // Gracefully fallback to browser speechSynthesis for zero-interruption voice continuous loop
+          // Choose voice locale dynamically based on script contents
+          const containsGeEz = /[\u1200-\u137F]/.test(replyText);
+          let fallbackLocale = "en-US";
+          if (containsGeEz) {
+            fallbackLocale = "am-ET";
+          } else if (targetLang !== "all") {
+            const localeMapping: Record<string, string> = {
+              am: "am-ET",
+              en: "en-US",
+              om: "om-ET",
+              ti: "ti-ET",
+              so: "so-SO",
+              zh: "zh-CN",
+              fr: "fr-FR",
+              ar: "ar-SA",
+              es: "es-ES"
+            };
+            fallbackLocale = localeMapping[targetLang] || "en-US";
+          }
+
+          playOfflineSpeech(replyText, fallbackLocale, () => {
+            setIsAiSpeaking(false);
+            if (isContinuousVoiceBridgeRef.current && activeRightTab === "chat") {
+              startChatRecording();
+            }
+          });
+        }
+      } catch (err) {
+        console.error("Failed to play TTS for chat reply", err);
+        setIsAiSpeaking(false);
+      }
+
+    } catch (err: any) {
+      console.error(err);
+      const friendlyMessage = err?.message || "Verify your API key or network status.";
+      setChatMessages(prev => [
+        ...prev, 
+        { 
+          role: "model", 
+          text: `⚠️ **AI Tutor Connection Failed**\n\nError: ${friendlyMessage}\n\n*Please ensure your GEMINI_API_KEY is configured in the settings, verify you have internet connectivity, or check if you have exceeded the service rate limit.*` 
+        }
+      ]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
+  const handleChatFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (chatInput.trim()) {
+      handleSendChatMessage({ text: chatInput.trim() });
+    }
+  };
+
+  // Automated Silence Detection Integration with Web Audio API Analyzer
+  const startSilenceDetection = (stream: MediaStream) => {
+    try {
+      cleanupWebAudio();
+
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+
+      const audioCtx = new AudioContextClass();
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.minDecibels = -80;
+      analyser.maxDecibels = -10;
+      analyser.smoothingTimeConstant = 0.85;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      chatAudioContextRef.current = audioCtx;
+      chatAnalyserRef.current = analyser;
+      chatActiveStreamRef.current = stream;
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      let silenceStart = 0;
+      let hasUserSpoken = false;
+      const startTime = Date.now();
+
+      const checkVolume = () => {
+        if (!chatAnalyserRef.current) return;
+        
+        // Measure Peak Amplitude in the Time-Domain data block (very responsive and highly visual!)
+        chatAnalyserRef.current.getByteTimeDomainData(dataArray);
+
+        let maxVal = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          const val = Math.abs(dataArray[i] - 128);
+          if (val > maxVal) {
+            maxVal = val;
+          }
+        }
+        
+        // Normalize peak value to a percentage (0 to 100)
+        const normalizedVolume = Math.min(100, Math.round((maxVal / 128) * 100));
+        setChatVolume(normalizedVolume);
+
+        const speakingThreshold = 8; // Gating threshold above ambient line noise
+        const silenceDurationMs = 1500; // 1.5 seconds underneath threshold triggers automatic send
+        const initialTimeoutMs = 8000; // 8 seconds of absolute silence before inactivity auto-off
+
+        if (isContinuousVoiceBridgeRef.current) {
+          if (normalizedVolume >= speakingThreshold) {
+            hasUserSpoken = true;
+            silenceStart = 0; // Speaking: reset silence duration timer
+          } else {
+            if (hasUserSpoken) {
+              if (silenceStart === 0) {
+                silenceStart = Date.now();
+              } else if (Date.now() - silenceStart > silenceDurationMs) {
+                // Silence Detected -> Stop recording and trigger auto-send!
+                cleanupWebAudio();
+                stopChatRecording();
+                return;
+              }
+            } else {
+              // User has been completely idle without saying anything initially
+              if (Date.now() - startTime > initialTimeoutMs) {
+                cleanupWebAudio();
+                if (chatMediaRecorderRef.current && chatMediaRecorderRef.current.state === "recording") {
+                  chatMediaRecorderRef.current.onstop = null; // Clear handler to abort empty submission
+                  chatMediaRecorderRef.current.stop();
+                  setIsChatRecording(false);
+                }
+                return;
+              }
+            }
+          }
+        }
+
+        chatAnimationFrameRef.current = requestAnimationFrame(checkVolume);
+      };
+
+      chatAnimationFrameRef.current = requestAnimationFrame(checkVolume);
+    } catch (err) {
+      console.error("Failed to start silence detection analyser:", err);
+    }
+  };
+
+  const cleanupWebAudio = () => {
+    if (chatAnimationFrameRef.current) {
+      cancelAnimationFrame(chatAnimationFrameRef.current);
+      chatAnimationFrameRef.current = null;
+    }
+    if (chatAudioContextRef.current) {
+      if (chatAudioContextRef.current.state !== 'closed') {
+        chatAudioContextRef.current.close().catch(e => console.error(e));
+      }
+      chatAudioContextRef.current = null;
+    }
+    chatAnalyserRef.current = null;
+    chatActiveStreamRef.current = null;
+    setChatVolume(0);
+  };
+
+  const startChatRecording = async () => {
+    // Stop any active TTS audio playback (PCM sound or local speech synthesis)
+    stopAnyActivePlayback();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setIsAiSpeaking(false);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chatMediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      chatAudioChunksRef.current = [];
+
+      chatMediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) chatAudioChunksRef.current.push(event.data);
+      };
+
+      chatMediaRecorderRef.current.onstop = () => {
+        const blob = new Blob(chatAudioChunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = () => {
+          const base64data = reader.result as string;
+          handleSendChatMessage({ audioBase64: base64data, audioMimeType: 'audio/webm' });
+        };
+        // stop tracks
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      chatMediaRecorderRef.current.start();
+      setIsChatRecording(true);
+
+      // Start Web Audio silence & volume analyzing engine
+      startSilenceDetection(stream);
+
+    } catch (err) {
+      console.error("Microphone permission denied or error:", err);
+      // Give fallback error
+    }
+  };
+
+  const stopChatRecording = () => {
+    cleanupWebAudio();
+    if (chatMediaRecorderRef.current && chatMediaRecorderRef.current.state === "recording") {
+      chatMediaRecorderRef.current.stop();
+      setIsChatRecording(false);
+    }
+  };
+
+  // 'Repeat After Me' Drill Recording & Pronunciation AI Analysis triggers
+  const startDrillRecording = async () => {
+    stopAnyActivePlayback();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setDrillFeedback(null);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      drillMediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      drillAudioChunksRef.current = [];
+
+      drillMediaRecorderRef.current.ondataavailable = (event) => {
+        if (event.data.size > 0) drillAudioChunksRef.current.push(event.data);
+      };
+
+      drillMediaRecorderRef.current.onstop = () => {
+        const blob = new Blob(drillAudioChunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = async () => {
+          const base64data = reader.result as string;
+          
+          if (currentDrillPhrase) {
+            await handleAnalyzeDrillPronunciation(base64data, currentDrillPhrase);
+          }
+        };
+        // stop tracks
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      drillMediaRecorderRef.current.start();
+      setIsDrillRecording(true);
+    } catch (err) {
+      console.error("Microphone permission denied for drill:", err);
+    }
+  };
+
+  const stopDrillRecording = () => {
+    if (drillMediaRecorderRef.current && drillMediaRecorderRef.current.state === "recording") {
+      drillMediaRecorderRef.current.stop();
+      setIsDrillRecording(false);
+    }
+  };
+
+  const handleAnalyzeDrillPronunciation = async (audioBase64: string, phrase: DrillPhrase) => {
+    setIsDrillAnalyzing(true);
+    try {
+      // Determine study language, fallback to targetLang or "am" based on contextual availability
+      const runLang = targetLang === "all" ? "am" : targetLang;
+      const response = await fetch("/api/analyze-pronunciation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetText: phrase.nativeText,
+          targetPhonetic: phrase.phonetic,
+          language: LANGUAGE_LABELS[runLang as SupportedLanguage]?.label || "Amharic",
+          audioBase64,
+          audioMimeType: "audio/webm"
+        })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        setDrillFeedback(result);
+        
+        // Save to drill history list
+        setDrillHistory(prev => [
+          {
+            text: phrase.nativeText,
+            score: typeof result.score === "number" ? result.score : 0,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          },
+          ...prev
+        ].slice(0, 20));
+
+      } else {
+        console.error("Pronunciation analyzer API non-ok status code received");
+      }
+    } catch (err) {
+      console.error("Failed to analyze drill pronunciation:", err);
+    } finally {
+      setIsDrillAnalyzing(false);
+    }
+  };
+
+  // Clean up recording if user switches tabs
+  useEffect(() => {
+    if (activeRightTab !== "chat") {
+      stopChatRecording();
+      setIsAiSpeaking(false);
+    }
+    if (activeRightTab !== "drills") {
+      stopDrillRecording();
+    }
+    stopAnyActivePlayback();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  }, [activeRightTab]);
+
+  // Synchronize dynamic default drill target when language choice switches
+  useEffect(() => {
+    const drillLanguage = targetLang === "all" ? "am" : targetLang;
+    const phrases = DRILL_BANK[drillLanguage as SupportedLanguage] || [];
+    if (phrases.length > 0) {
+      setCurrentDrillPhrase(phrases[0]);
+      setDrillFeedback(null);
+    }
+  }, [targetLang]);
+
+  const handleStopConversation = () => {
+    stopChatRecording();
+    setIsContinuousVoiceBridge(false);
+    stopAnyActivePlayback();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setIsAiSpeaking(false);
+    setChatMessages([
+      { role: "model", text: "Conversation stopped and reset successfully. Let me know when you are ready to start practicing or translating again!" }
+    ]);
+  };
+
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      setTimeout(() => {
+        if (chatScrollRef.current) {
+          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+        }
+      }, 50);
+    }
+  }, [chatMessages, isChatLoading, activeRightTab]);
 
   // Calendar integration states
   const [calendarPanelOpen, setCalendarPanelOpen] = useState(false);
@@ -814,6 +1380,8 @@ export default function App() {
         const transcript = event.results[0][0].transcript;
         if (transcript) {
           setInputText(prev => prev ? prev + " " + transcript : transcript);
+          isVoiceInputRef.current = true;
+          voiceTranscriptRef.current = transcript;
         }
       };
 
@@ -1232,8 +1800,14 @@ export default function App() {
       timestamp: new Date().toISOString(),
       amharic: result.originalText,
       translations: result.translations,
-      isOffline: offlineFlag
+      isOffline: offlineFlag,
+      isVoiceOnly: isVoiceInputRef.current,
+      voiceTranscript: isVoiceInputRef.current ? (voiceTranscriptRef.current || result.originalText) : undefined
     };
+
+    // Reset voice flags
+    isVoiceInputRef.current = false;
+    voiceTranscriptRef.current = "";
 
     setHistory(prev => {
       const updated = [newItem, ...prev].slice(0, 30); // Max 30 cache records
@@ -1242,7 +1816,7 @@ export default function App() {
     });
   };
 
-  // 5. Text-to-Speech vocal output: Web synthesiser for English, Gemini TTS for Regional dialects
+  // 5. Text-to-Speech vocal output: Priority premium Google TTS for ALL languages, with local DB cache and browser speechSynthesis fallbacks
   const handleHearVoice = async (langPlayKey: string, text: string, phonetic: string, playbackRate = 1.0, preferredVoiceURI?: string, volume = 1.0, loop = false): Promise<void> => {
     stopAnyActivePlayback();
     setActivePlayingCard(null);
@@ -1250,29 +1824,41 @@ export default function App() {
     const activeLang = langPlayKey.includes("-") ? langPlayKey.split("-")[1] as SupportedLanguage : langPlayKey as SupportedLanguage;
 
     return new Promise<void>(async (resolve) => {
-      // English, Chinese, French, Arabic, and Spanish have perfect offline/browser voice synthesiser support
-      if (activeLang === "en" || activeLang === "zh" || activeLang === "fr" || activeLang === "ar" || activeLang === "es") {
+      // 1. Try Premium Google TTS API if we are online (now prioritized for ALL languages to ensure high-fidelity, natural sounding native voices!)
+      if (!isOffline) {
         try {
-          setActivePlayingCard(langPlayKey);
-          let voiceLang = "en-US";
-          if (activeLang === "zh") voiceLang = "zh-CN";
-          else if (activeLang === "fr") voiceLang = "fr-FR";
-          else if (activeLang === "ar") voiceLang = "ar-SA";
-          else if (activeLang === "es") voiceLang = "es-ES";
+          setLoadingCardTts(langPlayKey);
+          console.log(`[Google TTS] Calling premium synthesis API for: "${text}" in ${activeLang}`);
+          const response = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text,
+              language: LANGUAGE_LABELS[activeLang]?.label || activeLang,
+              phonetic
+            })
+          });
 
-          playOfflineSpeech(text, voiceLang, () => {
-            setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
-            resolve();
-          }, playbackRate, preferredVoiceURI, volume, loop);
-        } catch (e) {
-          console.warn(`SpeechSynthesis error on ${activeLang}:`, e);
-          setActivePlayingCard(null);
-          resolve();
+          if (response.ok) {
+            const { audioData } = await response.json();
+            if (audioData) {
+              setActivePlayingCard(langPlayKey);
+              await playRawPcmBase64(audioData, 24000, playbackRate, volume, loop);
+              setActivePlayingCard(null);
+              resolve();
+              return;
+            }
+          } else {
+            console.warn(`[Google TTS] API returned non-ok status for ${activeLang}. Gracefully falling back to local/browser alternatives...`);
+          }
+        } catch (err) {
+          console.warn("[Google TTS] Premium online API failed, checking fallback options:", err);
+        } finally {
+          setLoadingCardTts(null);
         }
-        return;
       }
 
-      // For Oromo, Tigrinya, and Somali: Check high-quality voice packs offline database first (available offline & online!)
+      // 2. Offline / Fallback Option A: Check local high-quality IndexedDB pre-loaded voice packs (Oromo, Tigrinya, Somali, etc.)
       try {
         const cachedBase64 = await getAudio(activeLang, text);
         if (cachedBase64) {
@@ -1283,70 +1869,44 @@ export default function App() {
             resolve();
             return;
           } catch (playbackError) {
-            console.warn("Offline high-quality PCM voice playback failed, reverting to defaults:", playbackError);
+            console.warn("Offline high-quality PCM voice playback failed:", playbackError);
           }
         }
       } catch (dbError) {
         console.warn("IndexedDB voice pack fetch failed:", dbError);
       }
 
-      // For Oromo, Tigrinya, and Somali: If offline or API fails, speak the phonetic sound guide via browser synthesis
-      if (isOffline) {
-        try {
-          setActivePlayingCard(langPlayKey);
-          playOfflineSpeech(phonetic, "en-US", () => {
-            setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
-            resolve();
-          }, playbackRate, preferredVoiceURI, volume, loop);
-        } catch (e) {
-          console.warn("SpeechSynthesis error on offline phonetic speaker fallback:", e);
-          setActivePlayingCard(null);
-          resolve();
-        }
-        return;
-      }
-
-      // Online mode: call our backend Express TTS API using gemini-3.1-flash-tts-preview
+      // 3. Offline / Fallback Option B: Browser speech synthesis (Last resort for standard languages, or phonetic approximation)
       try {
-        setLoadingCardTts(langPlayKey);
-        const response = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text,
-            language: LANGUAGE_LABELS[activeLang]?.label || activeLang,
-            phonetic
-          })
-        });
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || "Voice synthesizer failed.");
+        setActivePlayingCard(langPlayKey);
+        
+        let voiceLang = "en-US";
+        let textToSpeak = text;
+        
+        if (activeLang === "zh") voiceLang = "zh-CN";
+        else if (activeLang === "fr") voiceLang = "fr-FR";
+        else if (activeLang === "ar") voiceLang = "ar-SA";
+        else if (activeLang === "es") voiceLang = "es-ES";
+        else if (activeLang === "am") voiceLang = "am-ET";
+        else if (activeLang === "om") {
+          voiceLang = "en-US";
+          textToSpeak = phonetic || text;
+        } else if (activeLang === "ti") {
+          voiceLang = "en-US";
+          textToSpeak = phonetic || text;
+        } else if (activeLang === "so") {
+          voiceLang = "en-US";
+          textToSpeak = phonetic || text;
         }
 
-        const { audioData } = await response.json();
-        if (audioData) {
-          setActivePlayingCard(langPlayKey);
-          await playRawPcmBase64(audioData, 24000, playbackRate, volume, loop);
-          setActivePlayingCard(null);
-        }
-        resolve();
-      } catch (err: any) {
-        console.error("Online synthesis failed:", err);
-        // Fallback: Speak phonetic version using browser Web Speech
-        try {
-          setActivePlayingCard(langPlayKey);
-          playOfflineSpeech(phonetic, "en-US", () => {
-            setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
-            resolve();
-          }, playbackRate, preferredVoiceURI, volume, loop);
-        } catch (e) {
-          console.warn("SpeechSynthesis error on online-to-offline phonetic speaker fallback:", e);
-          setActivePlayingCard(null);
+        playOfflineSpeech(textToSpeak, voiceLang, () => {
+          setActivePlayingCard(prev => prev === langPlayKey ? null : prev);
           resolve();
-        }
-      } finally {
-        setLoadingCardTts(null);
+        }, playbackRate, preferredVoiceURI, volume, loop);
+      } catch (e) {
+        console.warn("SpeechSynthesis fallback failed:", e);
+        setActivePlayingCard(null);
+        resolve();
       }
     });
   };
@@ -2640,6 +3200,66 @@ export default function App() {
         </div>
       )}
 
+      {/* Quick-Access Switcher Bar between Dictionary & Tutor modes */}
+      <div id="quick-workspace-switcher" className="max-w-7xl mx-auto px-4 mt-6 shrink-0">
+        <div className="bg-white border border-slate-200/85 rounded-2xl p-3 flex flex-col md:flex-row items-center justify-between gap-4 shadow-3xs hover:border-slate-300 transition-all">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full md:w-auto">
+            <span className="text-[11px] font-extrabold uppercase tracking-widest text-[#1e40af] font-sans flex items-center gap-1">
+              🚀 Quick Mode Switcher:
+            </span>
+            <div className="inline-flex bg-slate-100 p-1 rounded-xl border border-slate-205/60 w-full sm:w-auto shadow-3xs">
+              <button
+                type="button"
+                id="switcher-btn-dict"
+                onClick={() => setActiveRightTab("history")}
+                className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-extrabold transition-all cursor-pointer select-none ${
+                  activeRightTab === "history" || activeRightTab === "favorites"
+                    ? "bg-white text-[#1e40af] shadow-2xs border border-slate-205/40 scale-[1.02]"
+                    : "text-slate-500 hover:text-slate-750 hover:bg-slate-50"
+                }`}
+              >
+                📚 Dictionary & History
+              </button>
+              <button
+                type="button"
+                id="switcher-btn-tutor"
+                onClick={() => setActiveRightTab("chat")}
+                className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-extrabold transition-all cursor-pointer select-none ${
+                  activeRightTab === "chat"
+                    ? "bg-white text-[#1e40af] shadow-2xs border border-slate-205/40 scale-[1.02]"
+                    : "text-slate-500 hover:text-slate-750 hover:bg-slate-50"
+                }`}
+              >
+                💬 AI Conversation Tutor
+              </button>
+              <button
+                type="button"
+                id="switcher-btn-drills"
+                onClick={() => setActiveRightTab("drills")}
+                className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-extrabold transition-all cursor-pointer select-none ${
+                  activeRightTab === "drills"
+                    ? "bg-white text-[#1e40af] shadow-2xs border border-slate-205/40 scale-[1.02]"
+                    : "text-slate-500 hover:text-slate-750 hover:bg-slate-50"
+                }`}
+              >
+                🎯 Repeat After Me Drills
+              </button>
+            </div>
+          </div>
+          
+          <div className="flex items-center justify-between sm:justify-end gap-3 w-full md:w-auto border-t md:border-t-0 border-slate-100 pt-3 md:pt-0">
+            <span className="text-[10px] font-extrabold uppercase tracking-wide text-slate-400 font-sans">
+              Active Tutor Goal:
+            </span>
+            <div className="bg-[#eff6ff] text-[#1e40af] px-3 py-1.5 rounded-xl border border-blue-100 font-extrabold text-xs flex items-center gap-1.5 shadow-3xs">
+              <span>
+                {targetLang === "all" ? "🌍 All Langs" : `${LANGUAGE_LABELS[targetLang as SupportedLanguage]?.flag} ${LANGUAGE_LABELS[targetLang as SupportedLanguage]?.label}`}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Primary Container */}
       <main className="max-w-7xl mx-auto px-4 mt-8 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         
@@ -2778,7 +3398,11 @@ export default function App() {
                         : `✍️ Type phrases in ${LANGUAGE_LABELS[sourceLang]?.label} here...\n💡 Support comma-separated batch phrases! (e.g., Hello, Where is the hospital?)`
                     }
                     value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
+                    onChange={(e) => {
+                      setInputText(e.target.value);
+                      isVoiceInputRef.current = false;
+                      voiceTranscriptRef.current = "";
+                    }}
                     className="w-full h-36 p-4 rounded-2xl border border-slate-250 bg-slate-50/50 outline-none focus:border-[#1e40af] focus:ring-2 focus:ring-[#1e40af]/15 focus:bg-white text-slate-900 placeholder:text-slate-400 font-sans text-base leading-relaxed pr-10 resize-none transition-all"
                   />
                   
@@ -3227,15 +3851,24 @@ export default function App() {
                 {translationResult.grammarBreakdown && translationResult.grammarBreakdown.length > 0 && (
                   <div className="border-t border-white/10 pt-3 mt-3">
                     <span className="text-[10px] font-bold text-blue-250 tracking-wider block font-sans uppercase mb-2">
-                      Morphology &amp; Particle Breakdown
+                      Morphology &amp; Particle Breakdown (Click any word for Dictionary lookup)
                     </span>
                     <div className="flex flex-wrap gap-2">
                       {translationResult.grammarBreakdown.map((item, i) => (
-                        <div key={i} className="bg-white/10 border border-white/5 px-2.5 py-1 rounded-xl text-xs space-y-0.5 font-sans">
-                          <span className="font-sans font-bold text-white block">{item.word}</span>
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => handleWordClick(item.word, item.pos, item.meaning)}
+                          className="bg-white/10 border border-white/5 hover:bg-white/20 hover:border-white/20 active:scale-95 px-2.5 py-1.5 rounded-xl text-xs text-left space-y-0.5 font-sans cursor-pointer transition-all outline-none"
+                          title={`Click to view detailed bilingual dictionary definition for ${item.word}`}
+                        >
+                          <span className="font-sans font-bold text-white block flex items-center gap-1">
+                            {item.word}
+                            <span className="text-[8px] bg-[#1e40af]/30 text-blue-200 px-1 rounded uppercase">def</span>
+                          </span>
                           <span className="text-[9px] text-[#93c5fd] font-sans italic block lowercase">{item.pos}</span>
                           <span className="text-[10px] text-blue-100 block">{item.meaning}</span>
-                        </div>
+                        </button>
                       ))}
                     </div>
                   </div>
@@ -3295,15 +3928,76 @@ export default function App() {
 
                 {/* If Quiz Mode is active, show an elegant educational notice card */}
                 {quizMode && (
-                  <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-800 space-y-1 animate-fade-in flex items-start gap-2.5">
-                    <span className="text-base leading-none">💡</span>
-                    <div>
-                      <span className="font-extrabold text-amber-900 uppercase tracking-wider font-sans text-[10px] block mb-0.5">
-                        Vocabulary Retention Quiz Mode Active!
-                      </span>
-                      <p className="font-sans leading-relaxed text-amber-700">
-                        Translations are masked on all dialect cards below. Try pronouncing the translation in your head or stating it aloud, then click <strong className="text-amber-900">“Reveal Answer”</strong> to self-evaluate and test your retention!
-                      </p>
+                  <div className="space-y-4">
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs text-amber-800 space-y-1 animate-fade-in flex items-start gap-2.5">
+                      <span className="text-base leading-none">💡</span>
+                      <div>
+                        <span className="font-extrabold text-amber-900 uppercase tracking-wider font-sans text-[10px] block mb-0.5">
+                          Vocabulary Retention Quiz Mode Active!
+                        </span>
+                        <p className="font-sans leading-relaxed text-amber-700">
+                          Translations are masked on all dialect cards below. Try pronouncing the translation in your head or stating it aloud, then click <strong className="text-amber-900">“Reveal Answer”</strong> to self-evaluate and test your retention!
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Simple Local Storage Leaderboard of Top Mastered Phrases */}
+                    <div className="bg-slate-50 border border-slate-200 rounded-3xl p-4.5 animate-fade-in space-y-3 font-sans shadow-2xs">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-black text-[#1e40af] uppercase tracking-wider flex items-center gap-1.5">
+                          <Trophy className="w-3.5 h-3.5 text-amber-500 fill-amber-100" />
+                          <span>🏆 XP Leaderboard: Top 5 Mastered Phrases</span>
+                        </h4>
+                        <span className="text-[9px] text-slate-400 font-mono font-bold bg-white px-1.5 py-0.2 border rounded">Local Sync</span>
+                      </div>
+
+                      {topPhrases.length === 0 ? (
+                        <p className="text-[11px] text-slate-450 italic text-center py-2">
+                          No mastered phrases recorded yet! Earn XP by starting quizzes in the "Study Insights" collapsible of each card below.
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {topPhrases.map((lead, idx) => {
+                            const langLabelObj = LANGUAGE_LABELS[lead.lang as SupportedLanguage];
+                            return (
+                              <div 
+                                key={idx} 
+                                className="flex items-center justify-between p-2.5 bg-white border border-slate-150 rounded-xl hover:border-[#1e40af]/20 transition-all shadow-3xs"
+                              >
+                                <div className="flex items-center gap-2 pr-4 truncate">
+                                  <span className="w-5 h-5 flex items-center justify-center shrink-0">
+                                    {idx === 0 ? (
+                                      <span className="text-sm">👑</span>
+                                    ) : idx === 1 ? (
+                                      <span className="text-sm">🥈</span>
+                                    ) : idx === 2 ? (
+                                      <span className="text-sm">🥉</span>
+                                    ) : (
+                                      <span className="text-xs font-black text-slate-400 font-sans">{idx + 1}</span>
+                                    )}
+                                  </span>
+                                  {langLabelObj?.flag && (
+                                    <span className="text-xs leading-none shrink-0" title={langLabelObj.label}>
+                                      {langLabelObj.flag}
+                                    </span>
+                                  )}
+                                  <span className="text-[11px] font-semibold text-slate-800 truncate font-mono" title={lead.phrase}>
+                                    {lead.phrase}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span className="text-[9px] bg-slate-100 text-slate-500 font-sans font-extrabold uppercase rounded px-1.5 py-0.2 select-none">
+                                    {lead.lang}
+                                  </span>
+                                  <span className="text-[10px] font-black font-sans text-amber-700 bg-amber-500/10 px-2 py-0.5 rounded-md flex items-center gap-0.5">
+                                    ⭐ {lead.xp} XP
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -3599,6 +4293,34 @@ export default function App() {
                   <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#1e40af] rounded-full" />
                 )}
               </button>
+              <button
+                onClick={() => setActiveRightTab("chat")}
+                className={`flex items-center gap-1.5 pb-2 text-sm font-extrabold font-sans transition-all relative cursor-pointer ${
+                  activeRightTab === "chat"
+                    ? "text-[#1e40af]"
+                    : "text-slate-400 hover:text-slate-600"
+                }`}
+              >
+                <Bot className="w-4 h-4" />
+                <span>AI Tutor</span>
+                {activeRightTab === "chat" && (
+                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#1e40af] rounded-full" />
+                )}
+              </button>
+              <button
+                onClick={() => setActiveRightTab("drills")}
+                className={`flex items-center gap-1.5 pb-2 text-sm font-extrabold font-sans transition-all relative cursor-pointer ${
+                  activeRightTab === "drills"
+                    ? "text-[#1e40af]"
+                    : "text-slate-400 hover:text-slate-600"
+                }`}
+              >
+                <GraduationCap className="w-4 h-4" />
+                <span>Drills</span>
+                {activeRightTab === "drills" && (
+                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#1e40af] rounded-full" />
+                )}
+              </button>
             </div>
             
             {activeRightTab === "history" && history.length > 0 && (
@@ -3646,22 +4368,106 @@ export default function App() {
             )}
           </div>
 
-          <div className="relative mb-3">
-            <Search className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-400" />
-            <input
-              type="text"
-              placeholder={activeRightTab === "history" ? "Search history content..." : "Search favorites content..."}
-              value={activeRightTab === "history" ? historySearchQuery : favoritesSearchQuery}
-              onChange={(e) => {
-                if (activeRightTab === "history") {
-                  setHistorySearchQuery(e.target.value);
-                } else {
-                  setFavoritesSearchQuery(e.target.value);
-                }
-              }}
-              className="w-full pl-9 pr-4 py-1.5 text-xs rounded-xl border border-slate-200 outline-none focus:border-[#1e40af] focus:ring-1 focus:ring-[#1e40af]/20 bg-slate-50 font-sans"
-            />
+          {/* Ambient Soundscape Controller HUD */}
+          <div className="bg-[#f8fafc] border border-slate-200/80 rounded-2xl px-3.5 py-2.5 mb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs shadow-3xs">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
+                <Volume2 className="w-3.5 h-3.5 animate-pulse" />
+              </div>
+              <div>
+                <span className="font-extrabold text-slate-700 block text-[10.5px] leading-tight">Ambient Noise Immersion</span>
+                <span className="text-[9.2px] text-slate-400 font-medium">Procedural acoustic waves for comfort</span>
+              </div>
+            </div>
+            
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex bg-white border border-slate-200/70 p-0.5 rounded-xl shadow-4xs text-[9.5px] font-extrabold uppercase select-none">
+                <button
+                  type="button"
+                  onClick={() => setActiveSoundscape("none")}
+                  className={`px-2 py-1 rounded-lg transition-all cursor-pointer ${
+                    activeSoundscape === "none"
+                      ? "bg-slate-150 text-slate-800 font-black shadow-4xs"
+                      : "text-slate-400 hover:text-slate-650"
+                  }`}
+                >
+                  Mute
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSoundscape("addis_cafe")}
+                  className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                    activeSoundscape === "addis_cafe"
+                      ? "bg-indigo-600 text-white font-black shadow-4xs"
+                      : "text-slate-400 hover:text-slate-650"
+                  }`}
+                  title="Cafe in Addis coffee machine, mug clinks, chitchats"
+                >
+                  🇪🇹 Cafe
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSoundscape("library")}
+                  className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                    activeSoundscape === "library"
+                      ? "bg-indigo-600 text-white font-black shadow-4xs"
+                      : "text-slate-400 hover:text-slate-650"
+                  }`}
+                  title="Deep room silent tone with quiet page rustles"
+                >
+                  📚 Library
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSoundscape("nature_rain")}
+                  className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                    activeSoundscape === "nature_rain"
+                      ? "bg-indigo-600 text-white font-black shadow-4xs"
+                      : "text-slate-400 hover:text-slate-650"
+                  }`}
+                  title="Calming falling rain on glass windows with droplet clicks"
+                >
+                  🌧️ Rain
+                </button>
+              </div>
+
+              {activeSoundscape !== "none" && (
+                <div className="flex items-center gap-1.5 bg-white border border-slate-200/65 rounded-xl px-2.5 py-1 shadow-4xs">
+                  <VolumeX className="w-2.5 h-2.5 text-slate-400" />
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.4"
+                    step="0.01"
+                    className="w-12 sm:w-16 h-1 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                    value={soundscapeVolume}
+                    onChange={(e) => setSoundscapeVolume(parseFloat(e.target.value))}
+                  />
+                  <Volume2 className="w-2.5 h-2.5 text-indigo-500" />
+                  <span className="text-[9px] font-extrabold text-[#1a56db]">{Math.round(soundscapeVolume * 100)}%</span>
+                </div>
+              )}
+            </div>
           </div>
+
+          {(activeRightTab === "history" || activeRightTab === "favorites") && (
+            <div className="relative mb-3">
+              <Search className="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder={activeRightTab === "history" ? "Search history content..." : "Search favorites content..."}
+                value={activeRightTab === "history" ? historySearchQuery : favoritesSearchQuery}
+                onChange={(e) => {
+                  if (activeRightTab === "history") {
+                    setHistorySearchQuery(e.target.value);
+                  } else {
+                    setFavoritesSearchQuery(e.target.value);
+                  }
+                }}
+                className="w-full pl-9 pr-4 py-1.5 text-xs rounded-xl border border-slate-200 outline-none focus:border-[#1e40af] focus:ring-1 focus:ring-[#1e40af]/20 bg-slate-50 font-sans"
+              />
+            </div>
+          )}
 
           {/* Interactive Study Session Calendar Integration Form Planner */}
           {activeRightTab === "favorites" && favorites.length > 0 && (
@@ -3801,64 +4607,315 @@ export default function App() {
 
           {/* Tab Content Scrolling Pane */}
           <div className="flex-1 overflow-y-auto space-y-3 pr-1 md:pr-0">
-            {activeRightTab === "history" ? (
-              filteredHistory.length === 0 ? (
-                <div className="text-center py-12 text-slate-400 text-xs font-sans">
-                  No recent translation records matches your search query.
-                </div>
-              ) : (
-                filteredHistory.map((item, index) => (
-                  <div
-                    key={item.id}
-                    onClick={() => {
-                      const result: TranslationResult = {
-                        originalText: item.amharic,
-                        translations: item.translations,
-                        syllables: [item.amharic]
-                      };
-                      setTranslationResult(result);
-                      setInputText(item.amharic);
-                    }}
-                    className="p-3.5 bg-slate-50 hover:bg-[#eff6ff]/50 hover:border-[#1e40af]/20 border border-slate-200 rounded-2xl text-left cursor-pointer transition-all relative group shadow-2xs"
-                  >
-                    <button
-                      onClick={(e) => deleteHistoryItem(item.id, e)}
-                      className="absolute right-3 top-3.5 p-1 text-[#1e40af] hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                      title="Delete record"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-
-                    <div className="flex items-baseline gap-1.5 pr-6">
-                      <span className="text-[10px] text-slate-400 font-mono font-bold mr-1">
-                        {String(index + 1).padStart(2, '0')}
-                      </span>
-                      <span className={`text-[9.5px] border px-1.5 py-0.2 rounded font-sans font-bold uppercase ${
-                        item.isOffline 
-                          ? "bg-amber-50 border-amber-200 text-amber-700" 
-                          : "bg-blue-50 border-blue-200 text-[#1e40af]"
-                      }`}>
-                        {item.isOffline ? "Offline" : "Online"}
-                      </span>
-                      <span className="text-[10px] text-slate-400 font-sans font-medium">
-                        {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            {activeRightTab === "chat" ? (
+              <div className="flex flex-col h-full bg-slate-50/50 rounded-2xl border border-slate-200/60 overflow-hidden relative min-h-[350px]">
+                {/* Continuous Voice Bridge Interactive Status Controller header */}
+                <div className="bg-slate-50 border-b border-slate-200/75 p-3 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between text-xs font-sans shadow-3xs font-sans">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <div className="flex items-center gap-1.5 bg-white border border-slate-200 px-2 py-1 rounded-lg">
+                      <div className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                        isChatRecording 
+                          ? "bg-rose-500 animate-ping" 
+                          : isContinuousVoiceBridge 
+                            ? "bg-emerald-500 animate-pulse" 
+                            : "bg-slate-300"
+                      }`} />
+                      <span className="font-extrabold text-[#1e40af] uppercase tracking-wider text-[9px]">
+                        {isChatRecording 
+                          ? "Listening" 
+                          : isContinuousVoiceBridge 
+                            ? "Voice Bridge" 
+                            : "Push-To-Talk"}
                       </span>
                     </div>
 
-                    <h4 className="text-sm font-bold text-slate-800 mt-2 font-mono tracking-wide">
-                      {item.amharic}
-                    </h4>
-                    <div className="mt-2 space-y-0.5 text-xs text-slate-600 font-sans border-t border-slate-200/[0.45] pt-2">
-                      <p>English: <strong className="text-[#1e3a8a]">{item.translations.en?.text}</strong></p>
-                      <p>Afaan Oromo: <span className="text-slate-700">{item.translations.om?.text}</span></p>
-                      <p>Tigrinya: <span className="text-slate-700">{item.translations.ti?.text}</span></p>
-                      <p>Somali: <span className="text-slate-700">{item.translations.so?.text}</span></p>
-                      <p>Chinese (Mandarin): <span className="text-slate-700">{item.translations.zh?.text}</span></p>
+                    {/* Active Target Language indicator and dropdown */}
+                    <div className="flex items-center gap-1 bg-white border border-slate-205 px-2 py-0.5 rounded-lg text-[10px] font-extrabold text-slate-600 shadow-3xs">
+                      <span className="text-[9px] uppercase font-extrabold text-[#1e40af]">Tutor:</span>
+                      <select 
+                        value={targetLang}
+                        onChange={(e) => setTargetLang(e.target.value as SupportedLanguage | "all")}
+                        className="bg-transparent border-none outline-none font-extrabold text-slate-750 cursor-pointer text-[10.5px] py-0.5"
+                        title="Change tutor's active target language"
+                      >
+                        <option value="all">🌍 All East African Languages</option>
+                        {Object.entries(LANGUAGE_LABELS).map(([code, meta]) => (
+                          <option key={code} value={code}>{meta.flag} {meta.label}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
-                ))
-              )
-            ) : (
+                  
+                  <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setIsContinuousVoiceBridge(!isContinuousVoiceBridge);
+                        if (isContinuousVoiceBridge && isChatRecording) {
+                          stopChatRecording();
+                        }
+                      }}
+                      className={`px-2.5 py-1 rounded-xl text-[9px] font-extrabold uppercase tracking-widest border transition-all cursor-pointer ${
+                        isContinuousVoiceBridge 
+                          ? "bg-emerald-55 text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100" 
+                          : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50"
+                      }`}
+                    >
+                      Bridge: {isContinuousVoiceBridge ? "ON" : "OFF"}
+                    </button>
+                    <button
+                      type="button"
+                      id="stop-conversation-btn"
+                      onClick={handleStopConversation}
+                      className="px-2.5 py-1 rounded-xl text-[9px] font-extrabold uppercase tracking-widest bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition-all cursor-pointer shadow-3xs active:scale-95"
+                      title="Stop recording, mute voice synthesis, and reset the conversation"
+                    >
+                      Stop Convo
+                    </button>
+                  </div>
+                </div>
+
+                <div 
+                  ref={chatScrollRef} 
+                  className="flex-1 overflow-y-auto p-4 space-y-4 font-sans text-sm"
+                >
+                  {chatMessages.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                      <div className={`max-w-[85%] p-3 rounded-2xl ${
+                        msg.role === "user" 
+                          ? "bg-[#1e40af] text-white rounded-br-sm shadow-sm" 
+                          : "bg-white border border-slate-200 text-slate-800 rounded-bl-sm shadow-2xs"
+                      }`}>
+                        <div className="flex items-center gap-1.5 mb-1.5 opacity-80">
+                          {msg.role === "user" ? <User className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5 text-[#1e40af]" />}
+                          <span className="text-[10px] uppercase font-bold tracking-wider">
+                            {msg.role === "user" ? "You" : "AI Tutor"}
+                          </span>
+                        </div>
+                        <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {isChatLoading && (
+                    <div className="flex justify-start">
+                      <div className="bg-white border border-slate-200 text-slate-500 rounded-2xl rounded-bl-sm p-4 shadow-2xs flex gap-1.5 items-center">
+                        <span className="w-1.5 h-1.5 bg-[#1e40af]/60 rounded-full animate-bounce"></span>
+                        <span className="w-1.5 h-1.5 bg-[#1e40af]/60 rounded-full animate-bounce" style={{ animationDelay: "0.15s" }}></span>
+                        <span className="w-1.5 h-1.5 bg-[#1e40af]/60 rounded-full animate-bounce" style={{ animationDelay: "0.3s" }}></span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Real-time Web Audio API Level Meter sound-wave visualization */}
+                {isChatRecording && (
+                  <div className="px-4 py-2 bg-rose-50/50 border-t border-rose-100 flex items-center justify-between gap-3 text-xs font-sans animate-fade-in">
+                    <div className="flex items-center gap-2">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75 animate-bounce"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                      </span>
+                      <span className="text-rose-600 font-extrabold uppercase tracking-widest text-[9.5px]">
+                        Speaking... (silence auto-triggers send)
+                      </span>
+                    </div>
+                    <div className="flex gap-0.5 items-center h-3">
+                      {Array.from({ length: 12 }).map((_, barIdx) => {
+                        // Dynamic scaled height calculation with active range variation
+                        const activeHeight = Math.max(12, Math.min(100, chatVolume * 1.6 + (Math.sin((chatVolume + barIdx) * 1.1) * 12)));
+                        return (
+                          <div 
+                            key={barIdx} 
+                            className={`w-1 rounded-full transition-all duration-75 ${
+                              chatVolume > 8 ? "bg-rose-500" : "bg-[#1e40af]"
+                            }`}
+                            style={{ height: `${Math.max(4, activeHeight / 4.5)}px` }}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* AI Speech Active Feedback & Interrupt Action Control board */}
+                {isAiSpeaking && (
+                  <div className="px-4 py-2 bg-[#eff6ff] border-t border-blue-100 flex items-center justify-between gap-3 text-xs font-sans text-[#1e40af] animate-fade-in shadow-3xs">
+                    <div className="flex items-center gap-2 font-bold text-[9.5px] uppercase tracking-widest">
+                      <span className="h-2 w-2 bg-[#1e40af] rounded-full animate-ping" />
+                      <span>AI Speaking reply out loud</span>
+                    </div>
+                    <button 
+                      type="button" 
+                      onClick={() => {
+                        stopAnyActivePlayback();
+                        if (window.speechSynthesis) {
+                          window.speechSynthesis.cancel();
+                        }
+                        setIsAiSpeaking(false);
+                      }}
+                      className="text-[8.5px] uppercase tracking-widest font-extrabold border border-blue-200 bg-white hover:bg-[#eff6ff] text-[#1e40af] py-1 px-2.5 rounded-xl cursor-pointer transition-all active:scale-95"
+                    >
+                      Interrupt
+                    </button>
+                  </div>
+                )}
+
+                <form onSubmit={handleChatFormSubmit} className="p-3 bg-white border-t border-slate-200 flex gap-2">
+                  <input 
+                    type="text" 
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder={isChatRecording ? "Just speak naturally..." : "Type in Amharic, Oromo, English..."} 
+                    className="flex-1 px-3 py-2 border border-slate-200 focus:border-[#1e40af] focus:ring-1 focus:ring-[#1e40af]/20 rounded-xl outline-none text-sm transition-all shadow-xs"
+                    disabled={isChatRecording}
+                  />
+                  <button 
+                    type="button" 
+                    onClick={isChatRecording ? stopChatRecording : startChatRecording}
+                    className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-center shrink-0 ${
+                      isChatRecording 
+                        ? "bg-rose-50 border-rose-200 text-rose-500 animate-pulse hover:bg-rose-100" 
+                        : "bg-white border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700 shadow-xs active:scale-95"
+                    }`}
+                    title={isChatRecording ? "Stop voice listening" : "Start continuous voice bridge"}
+                  >
+                    <Mic className={`w-4 h-4 ${isChatRecording ? "text-rose-500" : ""}`} />
+                  </button>
+                  <button 
+                    type="submit" 
+                    disabled={isChatLoading || (!chatInput.trim() && !isChatRecording)}
+                    className="p-2.5 bg-[#1e40af] hover:bg-[#1d4ed8] text-white rounded-xl disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none transition-colors shadow-xs active:scale-95 cursor-pointer flex items-center justify-center shrink-0"
+                  >
+                    <Send className="w-4 h-4 ml-0.5" />
+                  </button>
+                </form>
+              </div>
+            ) : activeRightTab === "history" ? (
+              <div className="space-y-4">
+                {/* Clean inline layout for switching between text search vs voice logs */}
+                <div className="flex bg-slate-100 p-0.5 rounded-xl border border-slate-200 font-sans" id="history-sub-tab-root">
+                  <button
+                    type="button"
+                    onClick={() => setHistorySubTab("all")}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      historySubTab === "all"
+                        ? "bg-white text-slate-800 shadow-sm"
+                        : "text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    <span>⌨️ Text Logs</span>
+                    <span className={`text-[9px] font-black px-1.5 py-0.2 rounded-full font-mono ${
+                      historySubTab === "all" ? "bg-slate-100 text-slate-700" : "bg-slate-200/50 text-slate-500"
+                    }`}>
+                      {history.filter(h => !h.isVoiceOnly).length}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistorySubTab("voice")}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      historySubTab === "voice"
+                        ? "bg-white text-[#1e40af] shadow-sm"
+                        : "text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    <span>🎙️ VoiceLogs</span>
+                    <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full font-mono ${
+                      historySubTab === "voice" ? "bg-[#1e40af]/10 text-[#1e40af]" : "bg-slate-200/50 text-slate-500"
+                    }`}>
+                      {history.filter(h => h.isVoiceOnly).length}
+                    </span>
+                  </button>
+                </div>
+
+                {(() => {
+                  const subTabHistory = filteredHistory.filter(item => 
+                    historySubTab === "voice" ? !!item.isVoiceOnly : !item.isVoiceOnly
+                  );
+
+                  if (subTabHistory.length === 0) {
+                    return (
+                      <div className="text-center py-12 text-slate-400 text-xs font-sans bg-slate-50/50 border border-dashed border-slate-200 rounded-2xl">
+                        {historySubTab === "voice" 
+                          ? "No voice-only translation logs found. Use the speech microphone to record translation phrases!" 
+                          : "No recent translation records match your search."}
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-3.5">
+                      {subTabHistory.map((item, index) => {
+                        return (
+                          <div
+                            key={item.id}
+                            onClick={() => {
+                              const result: TranslationResult = {
+                                originalText: item.amharic,
+                                translations: item.translations,
+                                syllables: [item.amharic],
+                                grammarBreakdown: []
+                              };
+                              setTranslationResult(result);
+                              setInputText(item.amharic);
+                            }}
+                            className="p-3.5 bg-slate-50 hover:bg-[#eff6ff]/50 hover:border-[#1e40af]/20 border border-slate-200 rounded-2xl text-left cursor-pointer transition-all relative group shadow-2xs"
+                          >
+                            <button
+                              type="button"
+                              onClick={(e) => deleteHistoryItem(item.id, e)}
+                              className="absolute right-3 top-3.5 p-1 text-[#1e40af] hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                              title="Delete record"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+
+                            <div className="flex items-baseline gap-1.5 pr-6">
+                              <span className="text-[10px] text-slate-400 font-mono font-bold mr-1">
+                                {String(index + 1).padStart(2, '0')}
+                              </span>
+                              <span className={`text-[9.5px] border px-1 gold rounded font-sans font-bold uppercase ${
+                                item.isOffline 
+                                  ? "bg-amber-50 border-amber-200 text-amber-700" 
+                                  : "bg-blue-50 border-blue-200 text-[#1e40af]"
+                              }`}>
+                                {item.isOffline ? "Offline" : "Online"}
+                              </span>
+                              {item.isVoiceOnly && (
+                                <span className="text-[9.5px] bg-rose-50 border border-rose-250 text-rose-700 px-1.5 py-0.2 rounded font-sans font-bold uppercase inline-flex items-center gap-0.5">
+                                  🎙️ Voice Only
+                                </span>
+                              )}
+                              <span className="text-[10px] text-slate-450 font-sans font-medium">
+                                {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+
+                            {item.isVoiceOnly && item.voiceTranscript && (
+                              <div className="mt-2 text-xs bg-rose-50/50 border border-rose-100 p-2.5 rounded-xl text-rose-900 font-sans leading-normal">
+                                <span className="font-extrabold uppercase tracking-wide text-[9px] block mb-0.5 text-rose-700">🎙️ Spoken Input:</span>
+                                <p className="italic font-medium">"{item.voiceTranscript}"</p>
+                              </div>
+                            )}
+
+                            <h4 className="text-sm font-bold text-slate-800 mt-2 font-mono tracking-wide">
+                              {item.amharic}
+                            </h4>
+                            <div className="mt-2 space-y-0.5 text-xs text-slate-600 font-sans border-t border-slate-200/[0.45] pt-2">
+                              <p>English: <strong className="text-[#1e3a8a]">{item.translations.en?.text}</strong></p>
+                              <p>Afaan Oromo: <span className="text-slate-705">{item.translations.om?.text}</span></p>
+                              <p>Tigrinya: <span className="text-slate-705">{item.translations.ti?.text}</span></p>
+                              <p>Somali: <span className="text-slate-705">{item.translations.so?.text}</span></p>
+                              <p>Chinese (Mandarin): <span className="text-slate-705">{item.translations.zh?.text}</span></p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : activeRightTab === "favorites" ? (
               // Favorites list
               (() => {
                 const uniqueCategories: ("All" | "Essential" | "Emergency" | "Business" | "Casual")[] = ["All", "Essential", "Emergency", "Business", "Casual"];
@@ -4044,6 +5101,226 @@ export default function App() {
                   </div>
                 );
               })()
+            ) : (
+              // Drills interface
+              <div className="flex flex-col h-full bg-slate-50/50 rounded-2xl border border-slate-200/60 overflow-hidden relative min-h-[420px] p-4.5 font-sans space-y-4">
+                <div className="border-b border-slate-200/60 pb-3 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <span className="p-1 px-2 rounded-lg bg-orange-50 text-orange-600 text-[10.5px] font-black uppercase tracking-wider border border-orange-200/40">
+                      Drills Mode
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest font-mono">
+                      {LANGUAGE_LABELS[targetLang === "all" ? "am" : targetLang]?.label || "Amharic"} Native Coach
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-extrabold text-[#1a56db] mt-1.5 leading-tight">
+                    Repeat After Me Pronunciation Suite
+                  </h3>
+                  <p className="text-[10.5px] text-slate-500 mt-0.5 leading-snug">
+                    AI accent coach. Select a native phrase, listen to proper pronunciation, and echo it back to receive detailed waveform acoustic accuracy scores.
+                  </p>
+                </div>
+
+                {/* Drill Main Contents Splitter */}
+                <div className="flex-1 overflow-y-auto space-y-4.5 pb-4 min-h-0 pr-0.5">
+                  {/* Step 1: Selector of phrases in bank */}
+                  <div>
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-2 font-mono">
+                      Select Practice Target:
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                      {(DRILL_BANK[targetLang === "all" ? "am" : targetLang as SupportedLanguage] || []).map((phrase, idx) => {
+                        const isSelected = currentDrillPhrase?.nativeText === phrase.nativeText;
+                        return (
+                          <button
+                            key={phrase.nativeText}
+                            type="button"
+                            onClick={() => {
+                              stopAnyActivePlayback();
+                              setCurrentDrillPhrase(phrase);
+                              setDrillFeedback(null);
+                            }}
+                            className={`p-2.5 rounded-xl border text-left cursor-pointer transition-all select-none flex items-center justify-between gap-2 shadow-2xs ${
+                              isSelected
+                                ? "bg-blue-50/80 border-[#1e40af]/30 text-[#1e45b8] ring-1 ring-[#1e40af]/15"
+                                : "bg-white border-slate-200/70 hover:bg-slate-50 text-slate-705"
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-bold font-mono tracking-wide truncate block">{phrase.nativeText}</span>
+                              <span className="text-[9.5px] text-slate-400 font-medium font-sans truncate block">{phrase.meaning}</span>
+                            </div>
+                            <span className="text-[9px] font-mono text-slate-400 shrink-0 font-bold">
+                              #{idx + 1}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Step 2: Active Pronunciation & Recording Suite */}
+                  {currentDrillPhrase && (
+                    <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-3xs space-y-3">
+                      <div className="text-center py-2 bg-slate-50/60 rounded-xl border border-dashed border-slate-250/30">
+                        <span className="text-[9.2px] font-black uppercase tracking-widest text-[#1a56db] block font-mono">
+                          Native Target Phrase
+                        </span>
+                        <h2 className="text-xl font-bold font-mono tracking-wide text-slate-800 mt-1 leading-normal">
+                          {currentDrillPhrase.nativeText}
+                        </h2>
+                        {currentDrillPhrase.phonetic && (
+                          <span className="inline-block mt-1.5 px-2 py-0.5 rounded-lg bg-indigo-50 text-indigo-700 font-sans font-bold text-[10.5px] border border-indigo-100">
+                            {currentDrillPhrase.phonetic}
+                          </span>
+                        )}
+                        <p className="text-[11px] text-slate-505 mt-2 font-sans italic max-w-sm mx-auto">
+                          "{currentDrillPhrase.meaning}"
+                        </p>
+                      </div>
+
+                      {/* Control Panel Buttons */}
+                      <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
+                        {/* Speaker Output button */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const activeLangCode = targetLang === "all" ? "am" : targetLang;
+                            handleHearVoice(
+                              "drills-" + activeLangCode,
+                              currentDrillPhrase.nativeText,
+                              currentDrillPhrase.phonetic
+                            );
+                          }}
+                          className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-50 border border-indigo-100/70 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-extrabold transition-all cursor-pointer hover:shadow-2xs active:scale-97 select-none"
+                        >
+                          <Volume2 className="w-4 h-4 animate-bounce" />
+                          <span>1. Hear Native Speaker</span>
+                        </button>
+
+                        {/* Speech Input button */}
+                        <button
+                          type="button"
+                          onClick={isDrillRecording ? stopDrillRecording : startDrillRecording}
+                          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer select-none hover:shadow-2xs active:scale-97 ${
+                            isDrillRecording
+                              ? "bg-rose-600 hover:bg-rose-700 text-white animate-pulse"
+                              : "bg-[#1e40af] hover:bg-[#1d4ed8] text-white"
+                          }`}
+                        >
+                          {isDrillRecording ? (
+                            <MicOff className="w-4 h-4 text-white" />
+                          ) : (
+                            <Mic className="w-4 h-4 text-white" />
+                          )}
+                          <span>
+                            {isDrillRecording ? "2. Stop and Analyze" : "2. Speak & Repeat"}
+                          </span>
+                        </button>
+                      </div>
+
+                      {isDrillRecording && (
+                        <div className="flex items-center justify-center gap-2.5 py-1 text-rose-500 bg-rose-50/50 border border-rose-100 rounded-xl animate-pulse">
+                          <div className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping shrink-0" />
+                          <span className="text-[10px] font-black uppercase tracking-wider font-mono">Listening... Speak matching phrase now</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Step 3: Immediate AI Evaluation Waveform Feedback */}
+                  {isDrillAnalyzing && (
+                    <div className="bg-blue-50/30 border border-dashed border-blue-250/60 rounded-2xl p-6 flex flex-col items-center justify-center text-center space-y-3">
+                      <div className="w-8 h-8 rounded-full border-2 border-indigo-600 border-t-transparent animate-spin" />
+                      <div>
+                        <span className="text-xs font-extrabold text-slate-700 block font-sans">Analyzing spoken waveform phonetics...</span>
+                        <span className="text-[10px] text-slate-400 mt-1 block">Gemini 3.5-flash evaluation engine reviewing accent accuracy</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {!isDrillAnalyzing && drillFeedback && (
+                    <div className="bg-[#f0f9ff]/70 border border-blue-200 p-4.5 rounded-2xl shadow-3xs space-y-3 font-sans">
+                      <div className="flex items-center justify-between border-b border-blue-100/60 pb-2">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-black font-mono text-sm border shadow-4xs ${
+                            drillFeedback.score >= 80
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                              : drillFeedback.score >= 50
+                                ? "bg-amber-50 text-amber-700 border-amber-300"
+                                : "bg-rose-50 text-rose-700 border-rose-300"
+                          }`}>
+                            {drillFeedback.score}%
+                          </div>
+                          <div>
+                            <span className="text-[10.5px] font-black uppercase tracking-widest text-[#1a56db] block font-mono">
+                              Pronunciation Score
+                            </span>
+                            <span className={`text-[10px] font-extrabold font-sans block ${
+                              drillFeedback.score >= 80 ? "text-emerald-600" : drillFeedback.score >= 50 ? "text-amber-600" : "text-rose-500"
+                            }`}>
+                              Confidence: {drillFeedback.confidence}
+                            </span>
+                          </div>
+                        </div>
+
+                        <span className="p-1 px-2 rounded bg-white text-slate-500 text-[9px] font-bold font-mono shadow-5xs border border-slate-150">
+                          AI Evaluator Active
+                        </span>
+                      </div>
+
+                      {drillFeedback.feedback && (
+                        <div className="text-xs text-slate-700 leading-relaxed bg-white/60 p-3 rounded-xl border border-blue-150/40 font-medium">
+                          <strong className="text-blue-900 block font-black text-[10.5px] mb-1 font-sans uppercase">Coach Response Comments:</strong>
+                          {drillFeedback.feedback}
+                        </div>
+                      )}
+
+                      {drillFeedback.phoneticGuidance && (
+                        <div className="text-[11px] text-slate-650 leading-relaxed bg-white/30 p-3 rounded-xl border border-blue-150/20">
+                          <strong className="text-indigo-950 block font-black text-[10.5px] mb-0.5 font-sans uppercase">Correct Mouth &amp; Lip Guide:</strong>
+                          {drillFeedback.phoneticGuidance}
+                        </div>
+                      )}
+
+                      {drillFeedback.ipaMatch && (
+                        <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                          <span className="font-extrabold uppercase text-[9px] text-[#1e40af]">Ipa reference:</span>
+                          <span>{drillFeedback.ipaMatch}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Drilling Ledger/History List */}
+                  {drillHistory.length > 0 && (
+                    <div className="pt-2 border-t border-slate-200">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-2 font-mono">
+                        Recent Practice Attempts:
+                      </span>
+                      <div className="space-y-1 overflow-y-auto max-h-[140px] pr-1">
+                        {drillHistory.map((item, idx) => (
+                          <div key={idx} className="bg-white/55 border border-slate-205/50 rounded-xl p-2.5 flex items-center justify-between text-xs font-sans">
+                            <div className="min-w-0 flex-1">
+                              <span className="font-bold text-slate-800 tracking-wide font-mono block truncate">{item.text}</span>
+                              <span className="text-[9.5px] text-slate-450 mt-0.5 block font-mono">Attempted at {item.timestamp}</span>
+                            </div>
+                            <div className={`p-1 px-2 rounded-lg font-black font-mono text-[10.5px] shrink-0 ${
+                              item.score >= 80
+                                ? "bg-emerald-50 text-emerald-700"
+                                : item.score >= 50
+                                  ? "bg-amber-50 text-amber-700"
+                                  : "bg-rose-50 text-rose-700"
+                            }`}>
+                              {item.score}%
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -4056,6 +5333,125 @@ export default function App() {
           Amharic East African Voice &amp; Text Translator utilizing Gemini 3.5 LLMs and custom client-side audio players for regional pronunciation tutors. Designed with Professional Polish to preserve low-resource Horn of Africa regional spoken heritage.
         </p>
       </footer>
+
+      {/* Clickable Dictionary Word Definition Modal */}
+      {selectedWordDefinition && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/65 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-3xl shadow-xl w-full max-w-sm overflow-hidden border border-slate-200 font-sans transform scale-100 transition-all">
+            {/* Header */}
+            <div className="bg-[#1e40af] p-4.5 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <GraduationCap className="w-5 h-5 text-blue-200" />
+                <span className="font-sans font-bold text-xs tracking-wider uppercase">Bilingual Dictionary Lookup</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedWordDefinition(null)}
+                className="p-1 px-2.5 text-blue-100 hover:text-white hover:bg-white/10 rounded-lg font-sans font-extrabold text-sm transition-colors cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-5 space-y-4">
+              {loadingWordDefinition ? (
+                <div className="py-6 flex flex-col items-center justify-center gap-3">
+                  <div className="w-8 h-8 border-4 border-slate-250 border-t-[#1e40af] rounded-full animate-spin" />
+                  <p className="text-xs text-slate-500 font-medium animate-pulse font-sans">
+                    Analyzing root morphology and definition...
+                  </p>
+                </div>
+              ) : wordDefError ? (
+                <div className="py-2 text-center space-y-3">
+                  <div className="text-rose-500 text-3xl">⚠️</div>
+                  <p className="text-xs text-slate-600 leading-relaxed font-sans px-4">
+                    {wordDefError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => handleWordClick(selectedWordDefinition.word, selectedWordDefinition.pos, selectedWordDefinition.meaning)}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold font-sans text-xs rounded-xl transition-all cursor-pointer"
+                  >
+                    Retry Lookup
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4 animate-fade-in text-left">
+                  {/* Word Details Header */}
+                  <div className="border-b border-slate-100 pb-3 flex items-baseline justify-between flex-wrap gap-2">
+                    <div>
+                      <h3 className="text-xl font-black text-slate-900 font-sans leading-none">
+                        {selectedWordDefinition.word}
+                      </h3>
+                      <span className="text-[10px] text-[#1e40af] bg-blue-50 px-2 py-0.5 rounded font-mono font-bold uppercase mt-1.5 inline-block">
+                        {selectedWordDefinition.pos}
+                      </span>
+                    </div>
+                    {selectedWordDefinition.pronunciation && (
+                      <span className="text-xs text-slate-500 italic font-sans font-semibold">
+                        /{selectedWordDefinition.pronunciation}/
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Dictionary Definition Block */}
+                  <div className="space-y-1">
+                    <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest font-sans block">
+                      Detailed Definition
+                    </span>
+                    <p className="text-xs text-slate-700 leading-relaxed font-sans font-semibold">
+                      {selectedWordDefinition.definition || `No custom definition retrieved. Standard meaning is "${selectedWordDefinition.meaning}".`}
+                    </p>
+                  </div>
+
+                  {/* Synonyms */}
+                  {selectedWordDefinition.synonyms && selectedWordDefinition.synonyms.length > 0 && (
+                    <div className="space-y-1.5">
+                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest font-sans block">
+                        Associated Synonyms
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {selectedWordDefinition.synonyms.map((syn, idx) => (
+                          <span
+                            key={idx}
+                            className="text-[10.5px] font-sans font-semibold bg-slate-50 border border-slate-220 text-slate-700 px-2.5 py-0.5 rounded-lg"
+                          >
+                            {syn}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Example Sentence */}
+                  {selectedWordDefinition.example && (
+                    <div className="space-y-1.5 bg-slate-50 border border-slate-200/50 p-3 rounded-2xl">
+                      <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest font-sans block">
+                        Contextual Usage Example
+                      </span>
+                      <p className="text-xs text-slate-750 font-sans leading-relaxed italic">
+                        {selectedWordDefinition.example}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="bg-slate-50 border-t border-slate-100 p-3.5 text-right">
+              <button
+                type="button"
+                onClick={() => setSelectedWordDefinition(null)}
+                className="px-4 py-2 bg-[#1e40af] hover:bg-[#1d4ed8] text-white font-bold font-sans text-xs rounded-xl cursor-pointer transition-all hover:shadow-xs active:scale-95"
+              >
+                Close Lookup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

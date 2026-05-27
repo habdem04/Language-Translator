@@ -90,6 +90,8 @@ export interface HistoryItem {
   translations: LanguageTranslations;
   isOffline: boolean;
   notes?: string;
+  isVoiceOnly?: boolean;
+  voiceTranscript?: string;
 }
 
 export const LANGUAGE_LABELS: Record<SupportedLanguage, { label: string; details: string; flag: string }> = {

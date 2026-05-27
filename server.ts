@@ -410,23 +410,59 @@ app.post("/api/tts", async (req, res) => {
     // Tell TTS model how to say/accentuate based on language structure
     const voicePrompt = `Say clearly with accurate geographic native pronunciation accents for the ${language} language. The text is:\n"${text}". If helpful, refer to this approximate sound phonetic: ${phonetic || ""}.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.1-flash-tts-preview",
-      contents: [{ parts: [{ text: voicePrompt }] }],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Zephyr' } // Cool, clean voice option
-          }
+    let response;
+    let base64Audio = null;
+
+    // Retry block to handle voice configuration inconsistencies gracefully across environments
+    const voiceAttempts = [
+      { name: "Aoede", useConfig: true },
+      { name: "Puck", useConfig: true },
+      { name: "Default", useConfig: false }
+    ];
+
+    let lastErrorMsg = "";
+
+    for (const attempt of voiceAttempts) {
+      try {
+        console.log(`[Google TTS] Attempting synthesis using model 'gemini-3.1-flash-tts-preview' with voice: ${attempt.name}`);
+        
+        let config: any = {
+          responseModalities: ["AUDIO"]
+        };
+
+        if (attempt.useConfig) {
+          config.speechConfig = {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: attempt.name }
+            }
+          };
+        }
+
+        response = await ai.models.generateContent({
+          model: "gemini-3.1-flash-tts-preview",
+          contents: [{ parts: [{ text: voicePrompt }] }],
+          config: config
+        });
+
+        const data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (data) {
+          base64Audio = data;
+          console.log(`[Google TTS] Synthesis succeeded with voice: ${attempt.name}`);
+          break; // Succeeded!
+        }
+      } catch (err: any) {
+        lastErrorMsg = err?.message || String(err);
+        console.warn(`[Google TTS] Synthesis attempt with voice: ${attempt.name} failed:`, lastErrorMsg);
+        
+        // If we hit real 429 quota/resource exhaustion, do not retry other voices in a tight loop to protect resources
+        if (lastErrorMsg.includes("429") || lastErrorMsg.includes("RESOURCE_EXHAUSTED") || lastErrorMsg.includes("quota")) {
+          break;
         }
       }
-    });
-
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    }
 
     if (!base64Audio) {
-      throw new Error("No voice audio payload returned from Google TTS engine.");
+      throw new Error(`Google TTS engine failed to return audio. Reason: ${lastErrorMsg || "No response received"}`);
     }
 
     res.json({
@@ -435,7 +471,10 @@ app.post("/api/tts", async (req, res) => {
     });
   } catch (error: any) {
     console.error("TTS Endpoint Error:", error);
-    res.status(500).json({ error: error.message || "Failed to generate TTS audio stream." });
+    res.status(500).json({ 
+      error: error.message || "Failed to generate TTS audio stream.",
+      isQuotaExceeded: error.message?.includes("429") || error.message?.includes("RESOURCE_EXHAUSTED") || error.message?.includes("quota")
+    });
   }
 });
 
@@ -451,21 +490,67 @@ app.post("/api/chat", async (req, res) => {
 
     const ai = getAiClient();
 
-    // Map message list to model contents configuration:
-    // [{ role: "user" | "model", parts: [{ text: "..." }] }]
-    const contents = messages.map((msg: any) => ({
-      role: msg.role === "user" ? "user" : "model",
-      parts: [{ text: msg.text }]
-    }));
-
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: contents,
-      config: {
-        systemInstruction: systemInstruction || "You are a bilingual language instructor specializing in East African languages.",
-        temperature: Number(temperature),
+    const contents = messages.map((msg: any) => {
+      const parts: any[] = [];
+      if (msg.text) {
+        parts.push({ text: msg.text });
       }
+      if (msg.audioBase64) {
+        // Handle webm, ogg, or any other format that MediaRecorder might spit out
+        let cleanBase64 = msg.audioBase64;
+        if (msg.audioBase64.includes("base64,")) {
+          cleanBase64 = msg.audioBase64.split("base64,")[1];
+        }
+        parts.push({
+          inlineData: {
+            mimeType: msg.audioMimeType || "audio/webm",
+            data: cleanBase64
+          }
+        });
+      }
+      return {
+        role: msg.role === "user" ? "user" : "model",
+        parts
+      };
     });
+
+    let response;
+    try {
+      // Force 'gemini-3.5-flash' consistently as the primary model and bypass unsupported or legacy parameters
+      const targetModel = "gemini-3.5-flash";
+      response = await ai.models.generateContent({
+        model: targetModel,
+        contents: contents,
+        config: {
+          systemInstruction: systemInstruction || "You are a bilingual language instructor specializing in East African languages.",
+          temperature: Number(temperature),
+        }
+      });
+    } catch (genError: any) {
+      const errMsg = genError?.message || "";
+      // If the primary model is busy, rate-limited, or overloaded, fall back immediately to the stable and fast gemini-flash-latest
+      // Ensure we do not call nonexistent models like gemini-1.5-flash
+      if (
+        errMsg.includes("503") || 
+        errMsg.includes("429") || 
+        errMsg.includes("RESOURCE_EXHAUSTED") || 
+        errMsg.includes("demand") || 
+        errMsg.includes("UNAVAILABLE") ||
+        errMsg.includes("not found")
+      ) {
+        console.warn("Primary gemini-3.5-flash model busy, unavailable, or rate-limited. Falling back to robust gemini-flash-latest. Error was:", errMsg);
+        response = await ai.models.generateContent({
+          model: "gemini-flash-latest",
+          contents: contents,
+          config: {
+            systemInstruction: systemInstruction || "You are a bilingual language instructor specializing in East African languages.",
+            temperature: Number(temperature),
+          }
+        });
+      } else {
+        throw genError;
+      }
+    }
 
     res.json({
       text: response.text || ""
@@ -473,6 +558,137 @@ app.post("/api/chat", async (req, res) => {
   } catch (error: any) {
     console.error("AI Chat Endpoint Error:", error);
     res.status(500).json({ error: error.message || "Failed to generate chat response." });
+  }
+});
+
+// 3c. 'Repeat After Me' AI Pronunciation Evaluation API Route using Gemini 3.5-flash audio analyzing capability
+app.post("/api/analyze-pronunciation", async (req, res) => {
+  try {
+    const { targetText, targetPhonetic, language, audioBase64, audioMimeType } = req.body;
+    if (!audioBase64) {
+      res.status(400).json({ error: "Missing user audio recording to analyze." });
+      return;
+    }
+
+    const ai = getAiClient();
+
+    let cleanBase64 = audioBase64;
+    if (audioBase64.includes("base64,")) {
+      cleanBase64 = audioBase64.split("base64,")[1];
+    }
+
+    const prompt = `You are an expert linguistic accent coach and phonetic speech analyst specializing in the teaching of ${language}.
+Analyze the user's audio recording by comparing their spoken pronunciation against the expected native target:
+- Expected native phrase: "${targetText}"
+- Target phonetics: "${targetPhonetic || ""}"
+
+Listen intently to the syllable stress, tongue placement, vowel depth, and accent accuracy of the user's speech.
+Return your evaluation inside a valid JSON object with the following fields:
+{
+  "score": <an integer between 0 and 100 reflecting overall pronunciation/accent accuracy>,
+  "confidence": <one of "Excellent" | "Good" | "Fair" | "Keep practicing">,
+  "feedback": "<clear, actionable phonetic feedback focusing on specific syllables or sounds the user spoke correctly or needs to focus on>",
+  "phoneticGuidance": "<step-by-step guidance on how to make correct native tongue, lips, and throat sounds for this specific phrase>",
+  "ipaMatch": "<approximate IPA or vocal sound matching comparison or syllable breakdown>"
+}
+
+Strict Note: Return ONLY a raw JSON string. Do not wrap it in markdown codeblocks (no \`\`\`json). Just the JSON of the evaluation!`;
+
+    const contents = [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: audioMimeType || "audio/webm",
+              data: cleanBase64
+            }
+          }
+        ]
+      }
+    ];
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: contents,
+      config: {
+        responseMimeType: "application/json"
+      }
+    });
+
+    const replyText = response.text || "{}";
+    let scoreJson;
+    try {
+      scoreJson = JSON.parse(replyText);
+    } catch (parseErr) {
+      console.warn("Failed to parse JSON reply from Gemini, attempting regex extract", replyText);
+      const jsonMatch = replyText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        scoreJson = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error("Invalid response format from audio analyzer model.");
+      }
+    }
+
+    res.json(scoreJson);
+  } catch (error: any) {
+    console.error("Pronunciation Analyzer API Error:", error);
+    res.status(500).json({ error: error.message || "Failed to analyze pronunciation audio stream." });
+  }
+});
+
+// 3.5. Word Definition Dictionary API Route using Gemini-3.5-flash
+app.post("/api/word-definition", async (req, res) => {
+  try {
+    const { word, pos, meaning, language = "Amharic" } = req.body;
+    if (!word) {
+      res.status(400).json({ error: "Word parameter is required." });
+      return;
+    }
+
+    const ai = getAiClient();
+    const prompt = 
+      `You are an expert bilingual lexicographer. Provide a detailed, highly accurate dictionary definition for the word: "${word}".\n` +
+      `Additional context: Part of speech is "${pos || ''}", draft meaning is "${meaning || ''}", and language is "${language}".\n` +
+      `Return a valid JSON object matching this schema:\n` +
+      `{\n` +
+      `  "word": string,\n` +
+      `  "pos": string,\n` +
+      `  "pronunciation": string (phonetic pronunciation guide),\n` +
+      `  "definition": string (detailed educational linguistic dictionary definition),\n` +
+      `  "example": string (example sentence showing usage in the source language, with English translation in parentheses),\n` +
+      `  "synonyms": array of strings (at least 2-4 synonyms or closely associated terms)\n` +
+      `}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            word: { type: Type.STRING },
+            pos: { type: Type.STRING },
+            pronunciation: { type: Type.STRING },
+            definition: { type: Type.STRING },
+            example: { type: Type.STRING },
+            synonyms: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          },
+          required: ["word", "pos", "pronunciation", "definition", "example", "synonyms"]
+        }
+      }
+    });
+
+    const replyText = response.text || "{}";
+    res.json(JSON.parse(replyText));
+  } catch (error: any) {
+    console.error("Word Definition dictionary API error:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch word definition." });
   }
 });
 
